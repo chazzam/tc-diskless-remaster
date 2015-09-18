@@ -409,7 +409,7 @@ def write_onboot_lst(onboots, path):
     onboot_lst = join(path, 'onboot.lst')
     with open(onboot_lst, 'w') as f:
         for ext in onboots:
-            f.write(ext)
+            f.write('{0}\n'.format(ext))
 
 def write_copy2fs(copy2fs_exts, path):
     if len(copy2fs_exts) == 0:
@@ -426,7 +426,7 @@ def write_copy2fs(copy2fs_exts, path):
     extensions = copy2fs_exts.split(',')
     with open(copy2fs, 'w') as f:
         for ext in extensions:
-            f.write(ext)
+            f.write('{0}\n'.format(ext))
 
 def tc_bundle_path(dir_path, bundle):
     # chdir dir_path
@@ -443,7 +443,14 @@ def tc_bundle_path(dir_path, bundle):
         cwd=dir_path, shell=True)
     subprocess.call(['advdef', '-z4', bundle])
     print "processed config into initrd file: {0}".format(bundle)
-    
+
+def copy_extensions(dir_path, extensions):
+    # Copy .tcz, .tcz.dep, .tcz.md5.txt, .tcz.list, and .tcz.info
+    for ext in extensions:
+        subprocess.call(
+            "cp -fp {0} {0}.dep {0}.md5.txt {0}.list {0}.info {1} 2>/dev/null".\
+            format(ext, dir_path),
+            shell=True)
 
 def main(argv=None):
     """Main function of script.
@@ -479,7 +486,7 @@ def main(argv=None):
         onboot_list.update((config.get("install", "onboot")).split(','))
         onboot_list = extensionize_names(onboot_list)
         extension_list.update(onboot_list)
-    if config.has_option("install", "cpy2fs"):
+    if config.has_option("install", "copy2fs"):
         copy2fs_list.update((config.get("install", "copy2fs")).split(','))
         copy2fs_list = extensionize_names(copy2fs_list)
         extension_list.update(copy2fs_list)
@@ -506,16 +513,13 @@ def main(argv=None):
 
     print config.get("install", "output")
     work_root = mkdtemp(prefix="remaster")
-    work_dir = join(work_root, config.get("install", "install_root"))
+    work_dir = join(work_root, config.get("install", "install_root").lstrip('/'))
     work_install = join(work_dir, "optional/")
     mkdir_p(work_install)
     # Create temp working directory for install, mkdir -p install_root 'tce'
     # setup folder structure within temp dir
     # copy everything to temp dir
-    copy_args = ['cp', '-p']
-    copy_args.extend(extension_list)
-    copy_args.append(work_install)
-    subprocess.call(copy_args)
+    copy_extensions(work_install, extension_list)
     # write copy2fs.* and onboot.lst if needed
     write_onboot_lst(onboot_list, work_dir)
     if config.has_option("install", "copy2fs"):
