@@ -318,7 +318,10 @@ def get_dot_deps(dep):
         return deps
     with open(dep) as f:
         for line in f:
-            deps.add(line.strip())
+            new_dep = line.strip()
+            if new_dep == "":
+                continue
+            deps.add(new_dep)
     #~ try:
         #~ 
         #~ deps.update([line.strip() for line in open(dep)])
@@ -406,6 +409,7 @@ def write_onboot_lst(onboots, path):
 
     from os.path import join
 
+    print "Writing onboot.lst"
     onboot_lst = join(path, 'onboot.lst')
     with open(onboot_lst, 'w') as f:
         for ext in onboots:
@@ -420,9 +424,11 @@ def write_copy2fs(copy2fs_exts, path):
     copy2fs = join(path, 'copy2fs.lst')
     if ("all" in copy2fs_exts) or ("flag" in copy2fs_exts):
         copy2fs.replace(".lst", ".flg")
+        print "Creating copy2fs.flg"
         subprocess.call(['touch', copy2fs])
         return
 
+    print "Writing copy2fs.lst"
     extensions = copy2fs_exts.split(',')
     with open(copy2fs, 'w') as f:
         for ext in extensions:
@@ -438,10 +444,13 @@ def tc_bundle_path(dir_path, bundle):
     subprocess.call(['mv', '-f', bundle, bundle + '.old'])
     if (subprocess.call('advdef >/dev/null 2>&1',shell=True) == 0):
         gzip_lvl = 2
+    print "Packaging the additional init image, this can take a few moments..."
     subprocess.call(
         'find|cpio -o -H newc|gzip -{1} > {0}'.format(bundle, gzip_lvl),
         cwd=dir_path, shell=True)
-    subprocess.call(['advdef', '-z4', bundle])
+    if gzip_lvl == 2:
+        print "Further compressing the bundle with 'advdef', please wait..."
+        subprocess.call(['advdef', '-z4', bundle])
     print "processed config into initrd file: {0}".format(bundle)
 
 def copy_extensions(dir_path, extensions):
