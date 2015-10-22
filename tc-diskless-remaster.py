@@ -262,7 +262,10 @@ def extensionize_names(extensions):
         #build_dependency_tree.kernel = "3.0.21-tinycore"
         extensionize_names.kernel = _call_output('uname -r').strip()
     for raw_ext in extensions.copy():
-        safe_ext = raw_ext.replace("KERNEL", extensionize_names.kernel)
+        safe_ext = raw_ext.replace("KERNEL", extensionize_names.kernel).strip()
+        if safe_ext == "":
+            extensions.discard(raw_ext)
+            continue
         if not safe_ext.endswith(".tcz"):
             safe_ext += ".tcz"
         if safe_ext == raw_ext:
@@ -282,6 +285,7 @@ def recursive_dirs(dirs):
         set: abspath of initial directories and subdirs with symlinks dereferenced
     """
     from os import listdir
+    from os.path import join
     raw_dirs = set(dirs)
     safe_dirs = set()
     for raw_dir in raw_dirs.copy():
@@ -290,7 +294,8 @@ def recursive_dirs(dirs):
             #raw_dirs.remove(raw_dir)
             continue
         safe_dirs.add(safe_dir)
-        safe_dirs.update(recursive_dirs(listdir(safe_dir)))
+        new_dirs = [join(raw_dir,datum) for datum in listdir(safe_dir)]
+        safe_dirs.update(recursive_dirs(new_dirs))
     return safe_dirs
 
 def demote(user_uid, user_gid):
@@ -335,7 +340,7 @@ def get_dot_deps(dep):
 def get_deps(dirs, extensions, path_exts=None):
     """Get absolute dereferenced paths to all needed extensions
 
-    Identify absolute dereferenced path to an extension, and pul in any
+    Identify absolute dereferenced path to an extension, and pull in any
     dependencies found in its .dep file as well
     
     Args:
@@ -348,41 +353,39 @@ def get_deps(dirs, extensions, path_exts=None):
         set: absolute paths to all needed extensions
     """
     from os.path import basename, join
-    from os import getuid
+    from os import getuid, devnull
 
     if path_exts == None:
         path_exts = {}
     for raw_ext in extensions.copy():
+        raw_ext.strip()
         if raw_ext in path_exts:
             continue
+        if raw_ext == "":
+            continue
         # Can't run tce-load as root user, so demote this call if needed
-        dl_cmd = ['tce-load', '-w', raw_ext]
-        if (getuid == 0):
-            # these are the default values for tc:staff in TC
-            # not 100% sure we need to modify the gid to work...
-            subprocess.call(dl_cmd, preexec_fn=demote(1001,50))
-        else:
-            subprocess.call(dl_cmd)
+        with open(devnull, 'w') as FNULL:
+            #FNULL = open(devnull, 'w')
+            dl_cmd = ['tce-load', '-w', raw_ext]
+            if (getuid == 0):
+                # these are the default values for tc:staff in TC
+                # not 100% sure we need to modify the gid to work...
+                subprocess.call(dl_cmd, stdout=FNULL, preexec_fn=demote(1001,50))
+            else:
+                subprocess.call(dl_cmd, stdout=FNULL)
+        
         for t_dir in dirs:
-            raw_dirs = recursive_dirs([t_dir])
-            if len(raw_dirs) == 0:
+            path_ext = join(t_dir, raw_ext)
+            if not isfile(path_ext):
                 continue
-            found_dir = False
-            for raw_dir in raw_dirs:
-                path_ext = join(raw_dir, raw_ext)
-                if not isfile(path_ext):
-                    continue
-                path_exts[raw_ext] = path_ext
-                dep = path_ext + ".dep"
-                if isfile(dep):
-                    extensions.update(get_dot_deps(dep))
-                found_dir = True
-                break
-            if found_dir:
-                break
+            path_exts[raw_ext] = path_ext
+            dep = path_ext + ".dep"
+            if isfile(dep):
+                extensions.update(get_dot_deps(dep))
+            break
         else:
             # Need to fail here, because we never found the extension
-            print "Could not find extension: ", raw_ext
+            print "\n\nERROR: Could not find extension: ", raw_ext,"\n"
             exit(1)
     # If we're done: return complete deps list;
     # or send it deeper
@@ -429,9 +432,10 @@ def write_copy2fs(copy2fs_exts, path):
         return
 
     print "Writing copy2fs.lst"
-    extensions = copy2fs_exts.split(',')
+    #extensions = copy2fs_exts.split(',')
     with open(copy2fs, 'w') as f:
-        for ext in extensions:
+        #for ext in extensions:
+        for ext in copy2fs_exts:
             f.write('{0}\n'.format(ext))
 
 def tc_bundle_path(dir_path, bundle):
@@ -444,14 +448,14 @@ def tc_bundle_path(dir_path, bundle):
     subprocess.call(['mv', '-f', bundle, bundle + '.old'])
     if (subprocess.call('advdef >/dev/null 2>&1',shell=True) == 0):
         gzip_lvl = 2
-    print "Packaging the additional init image, this can take a few moments..."
+    print "Packaging the init image, this can take a few moments..."
     subprocess.call(
         'find|cpio -o -H newc|gzip -{1} > {0}'.format(bundle, gzip_lvl),
         cwd=dir_path, shell=True)
     if gzip_lvl == 2:
-        print "Further compressing the bundle with 'advdef', please wait..."
+        print "Further compressing the init image with 'advdef', please wait..."
         subprocess.call(['advdef', '-z4', bundle])
-    print "processed config into initrd file: {0}".format(bundle)
+    print "\nProcessed config into initrd file:\n\n    {0}\n".format(bundle)
 
 def copy_extensions(dir_path, extensions):
     # Copy .tcz, .tcz.dep, .tcz.md5.txt, .tcz.list, and .tcz.info
@@ -470,7 +474,7 @@ def main(argv=None):
     from sys import argv as sys_argv
     from shutil import rmtree
     from tempfile import mkdtemp
-    from os.path import join
+    from os.path import join, basename
 
     if argv is None:
         argv = sys_argv
@@ -482,7 +486,7 @@ def main(argv=None):
     except:
         pass
     if config is None:
-        print "ERROR: Could not process configuration file"
+        print "\n\nERROR: Could not process configuration file\n"
         return 1
     # Build current list of extensions (extensions + onboot)
     extension_list = set()
@@ -495,14 +499,28 @@ def main(argv=None):
         onboot_list.update((config.get("install", "onboot")).split(','))
         onboot_list = extensionize_names(onboot_list)
         extension_list.update(onboot_list)
+        print "\nOnboot extensions:\n{0}".format(', '.join(sorted(onboot_list)))
     if config.has_option("install", "copy2fs"):
         copy2fs_list.update((config.get("install", "copy2fs")).split(','))
-        copy2fs_list = extensionize_names(copy2fs_list)
-        extension_list.update(copy2fs_list)
-        # make sure there are no duplicates in onboot, and that it has .tcz
+        if not ( len(copy2fs_list) == 1 and 
+          ("all" in copy2fs_list or "flag" in copy2fs_list)
+          ):
+            copy2fs_list = extensionize_names(copy2fs_list)
+            extension_list.update(copy2fs_list)
     config.set("install", "onboot", ','.join(onboot_list))
     config.set("install", "copy2fs", ','.join(copy2fs_list))
     config.set("install", "extensions", ','.join(extension_list))
+    if config.has_option("install", "implicit_copy2fs"):
+        # Don't include the implicit copy2fs extensions in the regular copy2fs
+        # They are to be written to the copy2fs.lst, but not explicitly included
+        # in the image.
+        implicit_list = set(config.get("install", "implicit_copy2fs").split(','))
+        implicit_list = extensionize_names(implicit_list)
+        config.set("install", "implicit_copy2fs", ','.join(implicit_list))
+        # We do want to print the implicit copy2fs extensions though, so update it now
+        copy2fs_list.update(implicit_list)
+    if len(copy2fs_list) > 0: 
+        print "\nCopy to filesystem extensions:\n{0}".format(', '.join(sorted(copy2fs_list)))
 
     # Setup directory list default for extension searching
     dir_list = []
@@ -517,10 +535,21 @@ def main(argv=None):
         # Assume any extension in a local dir will have its .dep if it exists.
         # If any extension is never found, try to tce-load -w it
         # If still can't get an absolute path to everything, fail.
+    # Build out the recursive list of directories to search now.
+    print "\nBuilding recursive directory list..."
+    safe_dirs = []
+    for dir in dir_list:
+        raw_dirs = recursive_dirs([dir])
+        if len(raw_dirs) == 0:
+            continue
+        safe_dirs.extend(raw_dirs)
     # Get a flattened list of needed extensions
-    extension_list = get_deps(dir_list, extension_list)
+    print "Locating all extensions and dependencies..."
+    extension_list = get_deps(safe_dirs, extension_list)
+    print "\nIncluding extensions:\n{0}\n".format(
+        ', '.join(sorted([basename(ext) for ext in extension_list]))
+    )
 
-    print config.get("install", "output")
     work_root = mkdtemp(prefix="remaster")
     work_dir = join(work_root, config.get("install", "install_root").lstrip('/'))
     work_install = join(work_dir, "optional/")
@@ -531,8 +560,7 @@ def main(argv=None):
     copy_extensions(work_install, extension_list)
     # write copy2fs.* and onboot.lst if needed
     write_onboot_lst(onboot_list, work_dir)
-    if config.has_option("install", "copy2fs"):
-        write_copy2fs(config.get("install", "copy2fs"), work_dir)
+    write_copy2fs(copy2fs_list, work_dir)
     # squashfs the needful
     # gzip and advdef if it possible
     tc_bundle_path(work_root, config.get("install", "output"))
@@ -549,6 +577,6 @@ calling sys.exit here may allow for single point of exit within the script
 if __name__ == '__main__':
     from sys import exit, hexversion
     if hexversion < 0x02070000:
-        print "ERROR: Requires Python 2.7.0 or newer"
+        print "\n\nERROR: Requires Python 2.7.0 or newer\n"
         exit(1)
     exit(main())
