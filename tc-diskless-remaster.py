@@ -131,7 +131,7 @@ def get_options(argv=None):
         #~ "--available_ext", "-A", default="", nargs="*", help=argparse.SUPPRESS
     #~ )
     opts.add_argument(
-        "--install-root", "-O", default="/mnt/digium/",
+        "--install-root", "-O", default="/mnt/remaster/",
         help=argparse.SUPPRESS)
 
     #~ opts.add_argument(
