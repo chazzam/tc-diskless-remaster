@@ -3,6 +3,7 @@
 # download the given .tcz and the associated .dep and .md5.txt
 #set -x;
 
+# support -c<file> in addition to -c <file> ?
 if [ "$1" = "-c" ]; then
     shift;
     test -r "$1" && . "$1"
@@ -41,6 +42,7 @@ download_tcz() {
 missing_deps() {
     DEPS="$(
         cd "$TC_EXTENSIONS_DIR";
+        # Need to avoid grep -E to be more portable... tr?
         { ls; ls; cat *.tcz.dep|grep -Ev '^\s*$'; }|sed -e s/KERNEL/$TC_KERNEL/g|sort|uniq -u
     )"
 }
