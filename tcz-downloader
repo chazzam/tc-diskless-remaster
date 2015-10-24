@@ -1,0 +1,75 @@
+#!/bin/sh
+
+# download the given .tcz and the associated .dep and .md5.txt
+#set -x;
+
+if [ "$1" = "-c" ]; then
+    shift;
+    test -r "$1" || echo "Cannot read config $1" && exit 1;
+    . "$1"
+    shift;
+else
+    if [ -r ./tcz-downloader.conf ]; then . ./tcz-downloader.conf;
+    elif [ -r /usr/local/etc/tcz-downloader.conf ]; then . /usr/local/etc/tcz-downloader.conf;
+    elif [ -r /etc/tcz-downloader.conf ]; then . /etc/tcz-downloader.conf;
+    fi;
+fi;
+
+[ "$TC_MIRROR" = "" ] && echo "Failed to source config file" && exit 1;
+[ "$TC_KERNEL" = "" ] && echo "Failed to source config file" && exit 1;
+WGET="$(which wget)"
+[ "$WGET" = "" ] && echo "Must have wget in PATH" && exit 1;
+
+
+[ -d "$TC_EXTENSIONS_DIR" ] || mkdir -p "$TC_EXTENSIONS_DIR" 
+[ ! -d "$TC_EXTENSIONS_DIR" ] && echo "Could not create download directory" && exit 1;
+
+download_tcz() {
+    [ "$1" != "" ] || return 0
+    #local tcz=${1%%.tcz*}.tcz
+    #tcz="$(echo $tcz|sed s/KERNEL/$TC_KERNEL/)"
+    local tcz="$1";
+    local extension_url="${TC_MIRROR%%/}/${TC_TCZ_PATH%%/}/$tcz"
+    (
+        cd "$TC_EXTENSIONS_DIR";
+        wget -q "$extension_url" -O "$tcz";
+        wget -q "$extension_url.dep" -O "$tcz.dep" 2>/dev/null;
+        wget -q "$extension_url.md5.txt" -O "$tcz.md5.txt";
+        md5sum -c "$tcz.md5.txt" 2>/dev/null || rm -f "$tcz" "$tcz.md5.txt";
+    )
+}
+
+missing_deps() {
+    DEPS="$(
+        cd "$TC_EXTENSIONS_DIR";
+        { ls; ls; cat *.tcz.dep|grep -Ev '^\s*$'; }|sed -e s/KERNEL/$TC_KERNEL/g|sort|uniq -u
+    )"
+}
+
+download_extensions() {
+    local deps="$@";
+    [ "$deps" != "" ] || return 0;
+    for dep in $deps; do
+        dep="${dep%%.tcz*}.tcz"
+        dep="$(echo $dep|sed s/KERNEL/$TC_KERNEL/)"
+        if [ -f  "${TC_EXTENSIONS_DIR%%/}/$dep" ]; then
+            echo "$dep is already downloaded";
+            continue;
+        fi
+        download_tcz "$dep";
+        # Attempt to download it twice in case it failed the first time.
+        [ -f "${TC_EXTENSIONS_DIR%%/}/$dep" ] || download_tcz "$dep";
+    done;
+}
+
+download_deps() {
+    DEPS="$@";
+    local p_deps="";
+    while [ "$DEPS" != "$p_deps" ]; do
+        download_extensions "$DEPS"
+        p_deps="$DEPS"
+        missing_deps
+    done;
+}
+
+download_deps "$@"
