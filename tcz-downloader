@@ -5,8 +5,7 @@
 
 if [ "$1" = "-c" ]; then
     shift;
-    test -r "$1" || echo "Cannot read config $1" && exit 1;
-    . "$1"
+    test -r "$1" && . "$1"
     shift;
 else
     if [ -r ./tcz-downloader.conf ]; then . ./tcz-downloader.conf;
