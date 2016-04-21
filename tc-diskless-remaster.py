@@ -287,18 +287,18 @@ def recursive_dirs(dirs):
     """
     from os import listdir
     from os.path import join
-	if recursive_dirs.kernel == "":
-		recursive_dirs.kernel = _call_output('uname -r').strip()
-
+    if recursive_dirs.kernel == "":
+        recursive_dirs.kernel = _call_output('uname -r').strip()
     raw_dirs = set(dirs)
     safe_dirs = set()
     for raw_dir in raw_dirs.copy():
         safe_dir = realpath(abspath(expandvars(raw_dir)))
         if not isdir(safe_dir):
-            #raw_dirs.remove(raw_dir)
+            raw_dirs.remove(raw_dir)
             continue
         safe_dirs.add(safe_dir)
-        new_dirs = [join(raw_dir,datum) for datum in listdir(safe_dir) if datum != recursive_dirs.kernel]
+        new_dirs = [join(safe_dir,datum) for datum in listdir(safe_dir) if datum != recursive_dirs.kernel]
+        raw_dirs.remove(raw_dir)
         safe_dirs.update(recursive_dirs(new_dirs))
     return safe_dirs
 
