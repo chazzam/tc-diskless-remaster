@@ -28,7 +28,7 @@ _HOME = expanduser("~")
 
 def existing_dir(value):
     """verify argument is or references an existing directory.
-    
+
     One of these conditions must be met:
         the entire value must reference an existing directory
         the dirname(value) must reference an existing directory
@@ -60,7 +60,7 @@ def existing_dir(value):
 
 def existing_file(value):
     """verify argument is or references an existing file.
-    
+
     One of these conditions must be met:
         the entire value must reference an existing file
 
@@ -110,7 +110,7 @@ def get_options(argv=None):
         #~ "--copy2fs-all", "-C", action='store_true', default=True,
         #~ help="Create 'copy2fs.flg' to force copy install for all extensions")
     #~ opts.add_argument(
-        #~ "--copy2fs", "-c", nargs="*", 
+        #~ "--copy2fs", "-c", nargs="*",
         #~ help="Create 'copy2fs.lst' to force copy install for given extensions")
 
     # add default=//path/to/tce/optional/
@@ -225,7 +225,7 @@ def read_configuration(args):
     # 5. no args, config specifies a folder or we use cwd, config specifies a filename or we use config filename
     config.set(i, "output", final_output)
     return config
-    
+
 def disable_sigpipe():
     import signal
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
@@ -252,7 +252,7 @@ def extensionize_names(extensions):
 
     Make sure each name ends in .tcz
     Replace 'KERNEL' with current kernel version
-    
+
     Args:
         extensions: a set of extension names
     Returns:
@@ -274,11 +274,12 @@ def extensionize_names(extensions):
         extensions.add(safe_ext)
     return extensions
 
+@static_var("kernel", "")
 def recursive_dirs(dirs):
     """Get subdirs for given dirs
 
     Get all the sub directories of the passed in dirs, be they symlinks or not
-    
+
     Args:
         dirs: list of directory paths, can be symlinks
     Returns:
@@ -286,6 +287,9 @@ def recursive_dirs(dirs):
     """
     from os import listdir
     from os.path import join
+	if recursive_dirs.kernel == "":
+		recursive_dirs.kernel = _call_output('uname -r').strip()
+
     raw_dirs = set(dirs)
     safe_dirs = set()
     for raw_dir in raw_dirs.copy():
@@ -294,7 +298,7 @@ def recursive_dirs(dirs):
             #raw_dirs.remove(raw_dir)
             continue
         safe_dirs.add(safe_dir)
-        new_dirs = [join(raw_dir,datum) for datum in listdir(safe_dir)]
+        new_dirs = [join(raw_dir,datum) for datum in listdir(safe_dir) if datum != recursive_dirs.kernel]
         safe_dirs.update(recursive_dirs(new_dirs))
     return safe_dirs
 
@@ -328,7 +332,7 @@ def get_dot_deps(dep):
                 continue
             deps.add(new_dep)
     #~ try:
-        #~ 
+        #~
         #~ deps.update([line.strip() for line in open(dep)])
         #~ close(dep)
     #~ except:
@@ -342,7 +346,7 @@ def get_deps(dirs, extensions, path_exts=None):
 
     Identify absolute dereferenced path to an extension, and pull in any
     dependencies found in its .dep file as well
-    
+
     Args:
         dirs: list of directories to search for extensions
         extensions: set of extensions(s) to locate
@@ -357,6 +361,7 @@ def get_deps(dirs, extensions, path_exts=None):
 
     if path_exts == None:
         path_exts = {}
+    extensions.discard("")
     for raw_ext in extensions.copy():
         raw_ext.strip()
         if raw_ext in path_exts:
@@ -373,7 +378,7 @@ def get_deps(dirs, extensions, path_exts=None):
                 subprocess.call(dl_cmd, stdout=FNULL, preexec_fn=demote(1001,50))
             else:
                 subprocess.call(dl_cmd, stdout=FNULL)
-        
+
         for t_dir in dirs:
             path_ext = join(t_dir, raw_ext)
             if not isfile(path_ext):
@@ -502,7 +507,7 @@ def main(argv=None):
         print "\nOnboot extensions:\n{0}".format(', '.join(sorted(onboot_list)))
     if config.has_option("install", "copy2fs"):
         copy2fs_list.update((config.get("install", "copy2fs")).split(','))
-        if not ( len(copy2fs_list) == 1 and 
+        if not ( len(copy2fs_list) == 1 and
           ("all" in copy2fs_list or "flag" in copy2fs_list)
           ):
             copy2fs_list = extensionize_names(copy2fs_list)
@@ -519,7 +524,7 @@ def main(argv=None):
         config.set("install", "implicit_copy2fs", ','.join(implicit_list))
         # We do want to print the implicit copy2fs extensions though, so update it now
         copy2fs_list.update(implicit_list)
-    if len(copy2fs_list) > 0: 
+    if len(copy2fs_list) > 0:
         print "\nCopy to filesystem extensions:\n{0}".format(', '.join(sorted(copy2fs_list)))
 
     # Setup directory list default for extension searching
@@ -560,7 +565,8 @@ def main(argv=None):
     copy_extensions(work_install, extension_list)
     # write copy2fs.* and onboot.lst if needed
     write_onboot_lst(onboot_list, work_dir)
-    write_copy2fs(copy2fs_list, work_dir)
+    if config.has_option("install", "copy2fs"):
+        write_copy2fs(copy2fs_list, work_dir)
     # squashfs the needful
     # gzip and advdef if it possible
     tc_bundle_path(work_root, config.get("install", "output"))
