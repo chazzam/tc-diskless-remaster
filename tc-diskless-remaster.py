@@ -23,8 +23,8 @@ import ConfigParser
 # Try using .tree files to build dependency trees? Keep the shortest # preceeding spaces
 # Have to exclude the first line though? the first line is the extension itself.
 
-_HOME = expandvars("$HOME")
-_HOME = expanduser("~")
+#~ _HOME = expandvars("$HOME")
+#~ _HOME = expanduser("~")
 
 def existing_dir(value):
     """verify argument is or references an existing directory.
@@ -372,7 +372,7 @@ def get_deps(dirs, extensions, path_exts=None):
         with open(devnull, 'w') as FNULL:
             #FNULL = open(devnull, 'w')
             dl_cmd = ['tce-load', '-w', raw_ext]
-            if (getuid == 0):
+            if (getuid() == 0):
                 # these are the default values for tc:staff in TC
                 # not 100% sure we need to modify the gid to work...
                 subprocess.call(dl_cmd, stdout=FNULL, preexec_fn=demote(1001,50))
@@ -448,15 +448,39 @@ def tc_bundle_path(dir_path, bundle):
     #sudo find | sudo cpio -v -o -H newc | gzip -2 -v > bundle
     # advdef -z4 bundle
     from os.path import join
+    from subprocess import Popen, PIPE
     #chdir(dir_path)
     gzip_lvl = 9
     subprocess.call(['mv', '-f', bundle, bundle + '.old'])
     if (subprocess.call('advdef >/dev/null 2>&1',shell=True) == 0):
         gzip_lvl = 2
     print "Packaging the init image, this can take a few moments..."
-    subprocess.call(
-        'find|cpio -o -H newc|gzip -{1} > {0}'.format(bundle, gzip_lvl),
-        cwd=dir_path, shell=True)
+    retcode = 1
+    # Make sure the top level directory has correct permissions
+    subprocess.call(['sudo', 'chown', 'root:', dir_path])
+    subprocess.call(['sudo', 'chmod', '0755', dir_path])
+    with open(bundle, 'w') as f:
+        find = Popen(['sudo', 'find'], cwd=dir_path, stdout=PIPE)
+        cpio = Popen(
+            ['sudo','cpio','-mo','-H','newc'],
+            cwd=dir_path, stdin=find.stdout, stdout=PIPE
+        )
+        gzip = Popen(['gzip', '-{}'.format(gzip_lvl)],
+            cwd=dir_path, stdin=cpio.stdout, stdout=f
+        )
+        # Allow find to receive a SIGPIPE if cpio exits.
+        find.stdout.close()
+        #cpio.communicate()
+        cpio.stdout.close()
+        gzip.communicate()
+        # don't make a zombie process
+        find.wait()
+        cpio.wait()
+        # do we need to | find.returncode | cpio.returncode ?
+        retcode = gzip.returncode
+    #~ subprocess.call(
+        #~ 'find|cpio -o -H newc|gzip -{1} > {0}'.format(bundle, gzip_lvl),
+        #~ cwd=dir_path, shell=True)
     if gzip_lvl == 2:
         print "Further compressing the init image with 'advdef', please wait..."
         subprocess.call(['advdef', '-z4', bundle])
@@ -470,6 +494,61 @@ def copy_extensions(dir_path, extensions):
             format(ext, dir_path),
             shell=True)
 
+def extract_core(raw_core_path, work_dir):
+    """Extract a core.gz into work directory
+
+    Args:
+        raw_core_path: path to core.gz file to extract
+        work_dir: path to work_root
+    """
+    from subprocess import Popen, PIPE
+    from os import getuid
+    #~ if (getuid() != 0):
+        #~ print("ERROR: extracting initrd requires super user permissions")
+        #~ return 1
+    safe_core_path = realpath(abspath(expandvars(raw_core_path)))
+    if not isfile(safe_core_path):
+        print("initrd file not found: {}".format(safe_core_path))
+        return 1
+    #zcat safe_core_path | sudo cpio -i -H newc -d -p work_dir;
+    #~ subprocess.call(
+        #~ 'zcat {0} | sudo cpio -i -H newc -d'.format(safe_core_path),
+        #~ cwd=work_dir, shell=True
+    #~ )
+    zcat = Popen(['zcat', safe_core_path], stdout=PIPE)
+    cpio = Popen(
+        ['sudo','cpio','-mi','-H','newc','-d'],
+        cwd=work_dir, stdin=zcat.stdout, stdout=PIPE, stderr=PIPE
+    )
+    # Allow zcat to receive a SIGPIPE if cpio exits.
+    zcat.stdout.close()
+    cpio.communicate()
+    # don't make a zombie process
+    zcat.wait()
+    # do we need to | this with zcat.returncode ?
+    retcode = cpio.returncode
+    """
+    output=`dmesg | grep hda`
+    # becomes
+    p1 = Popen(["dmesg"], stdout=PIPE)
+    p2 = Popen(["grep", "hda"], stdin=p1.stdout, stdout=PIPE)
+    p1.stdout.close()  # Allow p1 to receive a SIGPIPE if p2 exits.
+    output = p2.communicate()[0]
+    p1.wait() # don't make zombies
+    retcode = p2.returncode
+    """
+    # TODO (chazzam) determine if the extraction succeeded
+    return retcode
+
+def sudo_rmtree(path):
+    """remove a path with sudo permissions
+
+    Args:
+        path: the path to delete
+    """
+    import subprocess
+    subprocess.call(['sudo', 'rm', '-rf', path])
+
 def main(argv=None):
     """Main function of script.
 
@@ -477,7 +556,6 @@ def main(argv=None):
     needed to build initrd image for booting with the needed file structure
     """
     from sys import argv as sys_argv
-    from shutil import rmtree
     from tempfile import mkdtemp
     from os.path import join, basename
 
@@ -558,11 +636,27 @@ def main(argv=None):
     work_root = mkdtemp(prefix="remaster")
     work_dir = join(work_root, config.get("install", "install_root").lstrip('/'))
     work_install = join(work_dir, "optional/")
-    mkdir_p(work_install)
     # Create temp working directory for install, mkdir -p install_root 'tce'
     # setup folder structure within temp dir
-    # copy everything to temp dir
-    copy_extensions(work_install, extension_list)
+    mkdir_p(work_install)
+
+    # TODO (chazzam) verify the value is boolean, set false if not
+    if not config.has_option("install", "expand_tcz"):
+        config.set("install", "expand_tcz", "no");
+
+    # If combined_init, extract the init into work_root
+    if config.has_option("install", "combined_init"):
+        # TODO (chazzam) check the output and verify this succeeds.
+        raw_init_path = config.get("install", "combined_init")
+        ret = extract_core(raw_init_path, work_root)
+        if ret != 0:
+            return 1
+    if config.getboolean("install", "expand_tcz"):
+        print("Currently, expanding the tcz files is unsupported")
+        return 1
+    else:
+        # copy everything to temp dir
+        copy_extensions(work_install, extension_list)
     # write copy2fs.* and onboot.lst if needed
     write_onboot_lst(onboot_list, work_dir)
     if config.has_option("install", "copy2fs"):
@@ -570,7 +664,7 @@ def main(argv=None):
     # squashfs the needful
     # gzip and advdef if it possible
     tc_bundle_path(work_root, config.get("install", "output"))
-    rmtree(work_root)
+    sudo_rmtree(work_root)
     return 0
 
 """allow unit testing and single exit point.
