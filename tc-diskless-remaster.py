@@ -459,6 +459,9 @@ def tc_bundle_path(dir_path, bundle):
     # Make sure the top level directory has correct permissions
     subprocess.call(['sudo', 'chown', 'root:', dir_path])
     subprocess.call(['sudo', 'chmod', '0755', dir_path])
+    dir_home = join(dir_path, 'home/tc')
+    if (isdir(dir_home)):
+        subprocess.call(['sudo', 'chown', '1001:50', dir_home])
     with open(bundle, 'w') as f:
         find = Popen(['sudo', 'find'], cwd=dir_path, stdout=PIPE)
         cpio = Popen(
