@@ -497,6 +497,21 @@ def copy_extensions(dir_path, extensions):
             format(ext, dir_path),
             shell=True)
 
+def copy_backup(raw_data, work_dir):
+    from os.path import join, basename
+    data_file = abspath(realpath(raw_data))
+    if not isfile(data_file):
+        return 1
+    if (
+        0 == subprocess.call(
+            ['sudo', 'cp', '-fp', 
+            data_file, 
+            join(work_dir, 'mydata.tgz')]
+        )
+    ):
+        return 0
+    return 1
+
 def extract_core(raw_core_path, work_dir):
     """Extract a core.gz into work directory
 
@@ -664,6 +679,8 @@ def main(argv=None):
     write_onboot_lst(onboot_list, work_dir)
     if config.has_option("install", "copy2fs"):
         write_copy2fs(copy2fs_list, work_dir)
+    if config.has_option("install", "mydata"):
+        copy_backup(config.get("install", "mydata"), work_dir)
     # squashfs the needful
     # gzip and advdef if it possible
     tc_bundle_path(work_root, config.get("install", "output"))
