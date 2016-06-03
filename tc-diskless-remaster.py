@@ -102,8 +102,11 @@ def get_options(argv=None):
     #~ )
     opts.add_argument(
 #        "--config", "-w", type=argparse.FileType('r'), default=default_config,
-        "--config", "-w", default=default_config,
+        "config", default=default_config,
         help="Specify config file for remaster operation")
+    opts.add_argument(
+        "--dry-run", "-n", action='store_true',
+        help="Determine needed dependencies and stop")
 
     # TODO(cmoye) change default to False once the code supports it (version 2+)
     #~ opts.add_argument(
@@ -650,6 +653,9 @@ def main(argv=None):
     print "\nIncluding extensions:\n{0}\n".format(
         ', '.join(sorted([basename(ext) for ext in extension_list]))
     )
+
+    if config.has_option("args", "dry_run"):
+        return 0
 
     work_root = mkdtemp(prefix="remaster")
     work_dir = join(work_root, config.get("install", "install_root").lstrip('/'))
