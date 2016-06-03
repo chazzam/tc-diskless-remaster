@@ -654,7 +654,9 @@ def main(argv=None):
         ', '.join(sorted([basename(ext) for ext in extension_list]))
     )
 
-    if config.has_option("args", "dry_run"):
+    if (config.has_option("args", "dry_run") and 
+        config.getboolean("args", "dry_run")
+    ):
         return 0
 
     work_root = mkdtemp(prefix="remaster")
