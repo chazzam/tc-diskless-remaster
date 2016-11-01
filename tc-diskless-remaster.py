@@ -1,4 +1,4 @@
-#!/usr/local/bin/python
+#!/usr/bin/env python3
 """
 Remaster a TinyCore for diskless operation
 """
@@ -8,7 +8,7 @@ import subprocess
 #~ from termios import tcflush, TCIFLUSH
 from os.path import \
     isfile, isdir, dirname, expanduser, realpath, expandvars, abspath
-import ConfigParser
+import configparser
 
 # Update to not managing tc-ext-tools at all, support a flag to specify a location
 # in which to search for extensions beyond the normal installed directory.
@@ -25,6 +25,76 @@ import ConfigParser
 
 #~ _HOME = expandvars("$HOME")
 #~ _HOME = expanduser("~")
+
+class Extension:
+    """Tiny Core Extension"""
+    def __init__(self, fullname):
+        from os.path import \
+            realpath, expandvars, abspath, dirname, basename
+        # Get the filename before dereferencing symlinks
+        self.name = basename(Extension.extensionize(fullname))
+        if dirname(fullname) == "":
+            self.path = ""
+            return
+        fullname = abspath(realpath(expandvars(fullname)))
+        self.path = dirname(fullname)
+
+    @staticmethod
+    def extensionize(name):
+        if name == "":
+            return name
+        if not name.endswith(".tcz"):
+            name += ".tcz"
+        return name
+
+    def update_path(self, path):
+        path = abspath(realpath(expandvars(path)))
+        self.path = dirname(path)
+
+    def full_path(self):
+        """return the full path"""
+        from os.path import join
+        fullpath = join(self.path, self.name)
+        return fullpath
+
+class ExtensionList:
+    """Tiny Core Extension List"""
+    import re
+    _re_KERNEL = re.compile('KERNEL')
+    # TODO: put the download extension and download deps on this list?
+    # can have download_extension and download_dep on Extension, with download_extensions and download_deps here?
+    # or could have all of it here, to reduce the amount of connections to the servers?
+    # Depends on how we handle the downloads. if we just call wget, we can stack them. 
+    # Not sure how to reuse the connection in python...
+
+    # TODO: have the extensionlist hide the -KERNEL -<kernel> exchange. Need to implement... but how? maybe the by reference dict...
+    def __init__(self, kernel):
+        self.kernel = kernel
+        self._kernel_re = None
+        self.extensions = dict()
+
+    def make_basename(self, name):
+        if self._kernel_re is None:
+            self._kernel_re = re.compile(self.kernel)
+        return re.sub(self._kernel_re, 'KERNEL', name)
+
+    def make_tczname(self, name):
+        return re.sub(re_KERNEL, self.kernel, name)
+
+    def add(self, extension):
+        """Add an extension to the list"""
+        raw_ext = Extension(extension)
+        if raw_ext.name in self.extensions:
+            return
+        basename = make_basename(raw_ext.name)
+        tczname = make_tczname(raw_ext.name)
+        self.extensions[tczname] = raw_ext
+        self.extensions[basename] = self.extensions[tczname]
+        # TODO: test and see if an update_path updates both dict values (by reference), or if the line below makes that happen instead
+        #~ self.extensions[basename] = raw_ext
+
+    def __iter__(self):
+        return self.extensions
 
 def existing_dir(value):
     """verify argument is or references an existing directory.
@@ -97,16 +167,24 @@ def get_options(argv=None):
     opts = argparse.ArgumentParser(
         description='Provide an initrd image to boot with tinycore.')
 
-    #~ opts.add_argument(
-        #~ "--output", "-o", type=existing_dir, help="output directory and/or file"
-    #~ )
     opts.add_argument(
-#        "--config", "-w", type=argparse.FileType('r'), default=default_config,
         "config", default=default_config,
         help="Specify config file for remaster operation")
     opts.add_argument(
+        "--output", "-o", type=existing_dir, help="output directory and/or file"
+    )
+    opts.add_argument(
         "--dry-run", "-n", action='store_true',
         help="Determine needed dependencies and stop")
+    opts.add_argument(
+        "--tinycore-version", "-t",
+        help="Tiny Core Major Version to build against")
+    opts.add_argument(
+        "--tinycore-arch", "-a",
+        help="CPU Architecture to build against")
+    opts.add_argument(
+        "--tinycore-kernel", "-k",
+        help="Tiny Core Kernel Version to build against")
 
     # TODO(cmoye) change default to False once the code supports it (version 2+)
     #~ opts.add_argument(
@@ -133,9 +211,10 @@ def get_options(argv=None):
     #~ opts.add_argument(
         #~ "--available_ext", "-A", default="", nargs="*", help=argparse.SUPPRESS
     #~ )
-    opts.add_argument(
-        "--install-root", "-O", default="/mnt/remaster/",
-        help=argparse.SUPPRESS)
+    #~ opts.add_argument(
+        #~ # "--install-root", "-O", default="/mnt/remaster/",
+        #~ "--install-root", "-O",
+        #~ help=argparse.SUPPRESS)
 
     #~ opts.add_argument(
         #~ "--write-config", "-W", action='store_true', default=False,
@@ -161,6 +240,20 @@ def get_options(argv=None):
     args = opts.parse_args(argv)
     return args
 
+def tc_kernel(major, arch):
+    kernels = dict({
+        '7': '4.2.9-tinycore',
+        '6': '3.16.6-tinycore',
+        '5': '3.8.13-tinycore',
+        '4': '3.0.21-tinycore'
+    })
+    if major not in kernels:
+        return None
+    kernel = kernels[major]
+    if arch == "x86_64":
+        kernel += "64"
+    return kernel
+
 def read_configuration(args):
     """Read the configuration file and add in commandline parameters
 
@@ -170,63 +263,52 @@ def read_configuration(args):
     """
     from os.path import basename, splitext
     from os.path import join as path_join
-    config = ConfigParser.SafeConfigParser(vars(args))
+    config = configparser.ConfigParser()
     try:
-        config.read(args.config)
-    except ConfigParser.Error:
+        config.read(vars(args)['config'])
+    except configparser.Error:
         return None
     # Create the internal sections
-    a = "args"
     i = "install"
-    for x in [a, i]:
-        if not config.has_section(x):
-            config.add_section(x)
+    if i not in config:
+        config[i] = {}
 
     # Add the args to the config
-    # TODO (chazzam) overwrite install with args instead of saving separately
-    # TODO (Chazzam) do the output nonsense in this loop
-    for opt in iter(vars(args)):
-        if vars(args).get(opt,"") != "":
-            config.set(a, opt, str(vars(args).get(opt)))
-    # Handle setting the output?
-    # Check for an output in config, but replace it with the one in arg if both specify file
-    # Check for a basename in args.output
-    config_ofolder = ""
-    config_ofile = ""
-    args_ofolder = ""
-    args_ofile = ""
-    final_output = ""
+    for k,v in vars(args).items():
+        if v is not None:
+            config[i][k] = str(v)
 
-    if config.has_option(i, "output"):
-        config_ofolder = abspath(dirname(config.get(i, "output")))
-        config_ofile = basename(config.get(i, "output"))
-        if not isdir(config_ofolder):
-            config_ofolder = ""
-        if config_ofile == "":
-            config_ofile = splitext(basename(args.config))[0]
-            config_ofile = "".join([config_ofile,".gz"])
-    aout = vars(args).get("output","")
-    if aout != "":
-        args_ofolder = abspath(dirname(aout))
-        args_ofile = basename(aout)
-        if not isdir(args_ofolder):
-            args_ofolder = ""
-    if args_ofile != "":
-        final_output = aout
-    elif isdir(args_ofolder):
-        final_output = path_join(args_ofolder, config_ofile)
+    # Update TC kernel if needed
+    if "tinycore-version" not in config[i] or config[i]["tinycore-version"] is None:
+        config[i]["tinycore-version"] = "7"
+    if "tinycore-arch" not in config[i] or config[i]["tinycore-arch"] is None:
+        config[i]["tinycore-arch"] = "x86"
+    kernel = tc_kernel(config[i]["tinycore-version"], config[i]["tinycore-arch"])
+
+    if (kernel is None and
+        ("tinycore-kernel" not in config[i] or
+        config[i]["tinycore-kernel"] is None)):
+            return None
+    config[i]["tinycore-kernel"] = kernel
+
+    # if no output, base off config filename, tc-version & arch, and curdir
+    if "output" not in config[i]:
+        new_out = splitext(basename(config[i]["config"]))[0]
+        new_out = "".join([
+            new_out,
+            "-",config[i]["tinycore-version"],
+            "-",config[i]["tinycore-arch"],
+            ".gz"
+        ])
+        new_path = abspath(realpath(expandvars("./")))
+        new_out = path_join(new_path, new_out)
+        config[i]["output"] = new_out
     else:
-        # This shouldn't happen if argparse is working correctly
-        if config_ofolder == "":
-            config_ofolder = abspath("./")
-        final_output = path_join(config_ofolder, config_ofile)
-    final_output = realpath(abspath(final_output))
-    # 1. args specifies a full path/file
-    # 2. args specifies a directory and config specifies an output file
-    # 3. args specifies a directory and config specifies a full path (keep basename)
-    # 4. args specifies a directory and we reuse the config filename as the output file base name
-    # 5. no args, config specifies a folder or we use cwd, config specifies a filename or we use config filename
-    config.set(i, "output", final_output)
+        # otherwise, just make sure it's a full absolute path
+        full_out = config[i]["output"]
+        full_out = abspath(realpath(expandvars(full_out)))
+        config[i]["output"] = full_out
+
     return config
 
 def disable_sigpipe():
@@ -248,6 +330,20 @@ def static_var(varname, value):
         setattr(func, varname, value)
         return func
     return decorate
+
+def download_file(url, filename):
+    if url is none or filename is none:
+        return False
+    import urlib.request
+    import shutil
+    with urllib.request.urlopen(url) as response, open(filename, 'wb') as out_file:
+        shutil.copyfileobj(response, out_file)
+
+def download_dot_dep(url,extension):
+    if url is none or filename is none:
+        return False
+    # Need a TC Mirror to use...
+
 
 @static_var("kernel", "")
 def extensionize_names(extensions):
@@ -393,7 +489,7 @@ def get_deps(dirs, extensions, path_exts=None):
             break
         else:
             # Need to fail here, because we never found the extension
-            print "\n\nERROR: Could not find extension: ", raw_ext,"\n"
+            print("\n\nERROR: Could not find extension: ", raw_ext,"\n")
             exit(1)
     # If we're done: return complete deps list;
     # or send it deeper
@@ -420,7 +516,7 @@ def write_onboot_lst(onboots, path):
 
     from os.path import join
 
-    print "Writing onboot.lst"
+    print("Writing onboot.lst")
     onboot_lst = join(path, 'onboot.lst')
     with open(onboot_lst, 'w') as f:
         for ext in onboots:
@@ -435,11 +531,11 @@ def write_copy2fs(copy2fs_exts, path):
     copy2fs = join(path, 'copy2fs.lst')
     if ("all" in copy2fs_exts) or ("flag" in copy2fs_exts):
         copy2fs.replace(".lst", ".flg")
-        print "Creating copy2fs.flg"
+        print("Creating copy2fs.flg")
         subprocess.call(['touch', copy2fs])
         return
 
-    print "Writing copy2fs.lst"
+    print("Writing copy2fs.lst")
     #extensions = copy2fs_exts.split(',')
     with open(copy2fs, 'w') as f:
         #for ext in extensions:
@@ -447,17 +543,15 @@ def write_copy2fs(copy2fs_exts, path):
             f.write('{0}\n'.format(ext))
 
 def tc_bundle_path(dir_path, bundle):
-    # chdir dir_path
-    #sudo find | sudo cpio -v -o -H newc | gzip -2 -v > bundle
+    # cd dir_path; sudo find|sudo cpio -v -o -H newc|gzip -2 -v > bundle
     # advdef -z4 bundle
     from os.path import join
     from subprocess import Popen, PIPE
-    #chdir(dir_path)
     gzip_lvl = 9
     subprocess.call(['mv', '-f', bundle, bundle + '.old'])
     if (subprocess.call('advdef >/dev/null 2>&1',shell=True) == 0):
         gzip_lvl = 2
-    print "Packaging the init image, this can take a few moments..."
+    print("Packaging the init image, this can take a few moments...")
     retcode = 1
     # Make sure the top level directory has correct permissions
     subprocess.call(['sudo', 'chown', 'root:', dir_path])
@@ -476,21 +570,16 @@ def tc_bundle_path(dir_path, bundle):
         )
         # Allow find to receive a SIGPIPE if cpio exits.
         find.stdout.close()
-        #cpio.communicate()
         cpio.stdout.close()
         gzip.communicate()
         # don't make a zombie process
         find.wait()
         cpio.wait()
-        # do we need to | find.returncode | cpio.returncode ?
         retcode = gzip.returncode
-    #~ subprocess.call(
-        #~ 'find|cpio -o -H newc|gzip -{1} > {0}'.format(bundle, gzip_lvl),
-        #~ cwd=dir_path, shell=True)
     if gzip_lvl == 2:
-        print "Further compressing the init image with 'advdef', please wait..."
+        print("Further compressing the init image with 'advdef', please wait...")
         subprocess.call(['advdef', '-z4', bundle])
-    print "\nProcessed config into initrd file:\n\n    {0}\n".format(bundle)
+    print("\nProcessed config into initrd file:\n\n    {0}\n".format(bundle))
 
 def copy_extensions(dir_path, extensions):
     # Copy .tcz, .tcz.dep, .tcz.md5.txt, .tcz.list, and .tcz.info
@@ -507,8 +596,8 @@ def copy_backup(raw_data, work_dir):
         return 1
     if (
         0 == subprocess.call(
-            ['sudo', 'cp', '-fp', 
-            data_file, 
+            ['sudo', 'cp', '-fp',
+            data_file,
             join(work_dir, 'mydata.tgz')]
         )
     ):
@@ -590,7 +679,7 @@ def main(argv=None):
     except:
         pass
     if config is None:
-        print "\n\nERROR: Could not process configuration file\n"
+        print("\n\nERROR: Could not process configuration file\n")
         return 1
     # Build current list of extensions (extensions + onboot)
     extension_list = set()
@@ -603,7 +692,7 @@ def main(argv=None):
         onboot_list.update((config.get("install", "onboot")).split(','))
         onboot_list = extensionize_names(onboot_list)
         extension_list.update(onboot_list)
-        print "\nOnboot extensions:\n{0}".format(', '.join(sorted(onboot_list)))
+        print("\nOnboot extensions:\n{0}".format(', '.join(sorted(onboot_list))))
     if config.has_option("install", "copy2fs"):
         copy2fs_list.update((config.get("install", "copy2fs")).split(','))
         if not ( len(copy2fs_list) == 1 and
@@ -624,13 +713,13 @@ def main(argv=None):
         # We do want to print the implicit copy2fs extensions though, so update it now
         copy2fs_list.update(implicit_list)
     if len(copy2fs_list) > 0:
-        print "\nCopy to filesystem extensions:\n{0}".format(', '.join(sorted(copy2fs_list)))
+        print("\nCopy to filesystem extensions:\n{0}".format(', '.join(sorted(copy2fs_list))))
 
     # Setup directory list default for extension searching
     dir_list = []
     if config.has_option("install", "extensions_local_dir"):
         dir_list = config.get("install", "extensions_local_dir").split(',')
-    dir_list.append('/etc/sysconfig/tcedir/optional/')
+    dir_list.append('/etc/sysconfig/tcedir/optional/upgrades', '/etc/sysconfig/tcedir/optional/')
     config.set("install", "extensions_local_dir", ','.join(dir_list))
 
     # Need to verify all of them end in .tcz
@@ -640,7 +729,7 @@ def main(argv=None):
         # If any extension is never found, try to tce-load -w it
         # If still can't get an absolute path to everything, fail.
     # Build out the recursive list of directories to search now.
-    print "\nBuilding recursive directory list..."
+    print("\nBuilding recursive directory list...")
     safe_dirs = []
     for dir in dir_list:
         raw_dirs = recursive_dirs([dir])
@@ -648,13 +737,13 @@ def main(argv=None):
             continue
         safe_dirs.extend(raw_dirs)
     # Get a flattened list of needed extensions
-    print "Locating all extensions and dependencies..."
+    print("Locating all extensions and dependencies...")
     extension_list = get_deps(safe_dirs, extension_list)
-    print "\nIncluding extensions:\n{0}\n".format(
+    print("\nIncluding extensions:\n{0}\n".format(
         ', '.join(sorted([basename(ext) for ext in extension_list]))
-    )
+    ))
 
-    if (config.has_option("args", "dry_run") and 
+    if (config.has_option("args", "dry_run") and
         config.getboolean("args", "dry_run")
     ):
         return 0
@@ -704,7 +793,7 @@ calling sys.exit here may allow for single point of exit within the script
 """
 if __name__ == '__main__':
     from sys import exit, hexversion
-    if hexversion < 0x02070000:
-        print "\n\nERROR: Requires Python 2.7.0 or newer\n"
+    if hexversion < 0x03050000:
+        print("\n\nERROR: Requires Python 3.5.0 or newer\n")
         exit(1)
     exit(main())
