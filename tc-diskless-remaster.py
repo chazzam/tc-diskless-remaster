@@ -20,25 +20,23 @@ import configparser
 # /etc/sysconfig/tcedir/
 # /etc/sysconfig/tcedir/optional/
 
-# Try using .tree files to build dependency trees? Keep the shortest # preceeding spaces
-# Have to exclude the first line though? the first line is the extension itself.
-
-#~ _HOME = expandvars("$HOME")
-#~ _HOME = expanduser("~")
-
 class Extension:
     """Tiny Core Extension"""
     def __init__(self, fullname):
         from os.path import dirname, basename
         # Get the filename before dereferencing symlinks
-        self.name = basename(Extension.extensionize(fullname))
+        self.name = basename(Extension.extensionize(fullname.strip()))
         self.path = ""
         self.exists = False
-        self.update_path(dirname(fullname))
+        self.update_path(dirname(fullname.strip()))
         self.depof = None
+
+    def __str__(self):
+        return self.full_path()
 
     @staticmethod
     def extensionize(name):
+        name = name.strip()
         if name == "":
             return name
         if not name.endswith(".tcz"):
@@ -54,24 +52,21 @@ class Extension:
         if not isdir(path) or not isfile(fullpath):
             return False
         self.exists = True
-        self.path = dirname(path)
+        self.path = path
         return True
 
     def full_path(self):
         """return the full path"""
         from os.path import join
         fullpath = join(self.path, self.name)
+        if self.path == "":
+            fullpath = self.name
         return fullpath
 
 class ExtensionList:
     """Tiny Core Extension List"""
     import re
     _re_KERNEL = re.compile('KERNEL')
-    # TODO: put the download extension and download deps on this list?
-    # can have download_extension and download_dep on Extension, with download_extensions and download_deps here?
-    # or could have all of it here, to reduce the amount of connections to the servers?
-    # Depends on how we handle the downloads. if we just call wget, we can stack them.
-    # Not sure how to reuse the connection in python...
 
     @staticmethod
     def tc_kernel(major, arch):
@@ -88,12 +83,11 @@ class ExtensionList:
             kernel += "64"
         return kernel
 
-    # TODO: have the extensionlist hide the -KERNEL -<kernel> exchange. Need to implement... but how? maybe the by reference dict...
     def __init__(self,
         version = "7",
         arch = "x86",
-        kernel = "4.2.9-tinycore"
-        mirror = "http://tinycorelinux.net",
+        kernel = "4.2.9-tinycore",
+        mirror = "http://tinycorelinux.net"
     ):
         self.kernel = kernel.strip()
         self.mirror = mirror.strip().rstrip("/")
@@ -105,7 +99,7 @@ class ExtensionList:
 
         # Update Kernel if needed.
         kernel = ExtensionList.tc_kernel(version, arch)
-        if kernel != self.kernel:
+        if kernel is not None and kernel != self.kernel:
             self.kernel = kernel
 
     def __iter__(self):
@@ -114,70 +108,229 @@ class ExtensionList:
     def __len__(self):
         return len(self.extensions)
 
+    def __str__(self):
+        return ", ".join(sorted(self.extensions.keys()))
+
+    def __contains__(self, item):
+        # if item is <name>-KERNEL.tcz, convert to tczname and search
+        raw_name = item
+        if isinstance(item, Extension):
+            raw_name = item.name
+        tczname = self.make_tczname(raw_name)
+        return tczname in self.extensions
+
     def make_basename(self, name):
         import re
         if self._kernel_re is None:
             self._kernel_re = re.compile(self.kernel)
-        return re.sub(self._kernel_re, 'KERNEL', name)
+        return re.sub(self._kernel_re, 'KERNEL', name.strip())
 
     def make_tczname(self, name):
         import re
-        return re.sub(ExtensionList._re_KERNEL, self.kernel, name)
+        return re.sub(ExtensionList._re_KERNEL, self.kernel, name.strip())
 
-    def append(self, extension):
-        """Add a string extension to the list"""
-        if extension is None or extension == "":
-            return
-        raw_ext = Extension(extension)
-        if raw_ext is None or raw_ext.name == "":
-            return
-        self.add_extension(raw_ext)
-
-    def add_extension(self, raw_ext):
+    def add(self, raw_ext):
         """Add an Extension to the list"""
-        if raw_ext is None or raw_ext.name == "":
+        if raw_ext is None:
             return
-        basename = self.make_basename(raw_ext.name)
-        tczname = self.make_tczname(raw_ext.name)
+        if not isinstance(raw_ext, Extension):
+            raw_ext = Extension(raw_ext.strip())
+        if raw_ext.name == "":
+            return
+        safe_ext = raw_ext
+        basename = self.make_basename(safe_ext.name)
+        tczname = self.make_tczname(safe_ext.name)
         if (
             basename in self.extension_bases or
             tczname in self.extensions
         ):
             return
-        raw_ext.name = tczname
-        self.extensions[tczname] = raw_ext
+        safe_ext.name = tczname
+        self.extensions[tczname] = safe_ext
         self.extension_bases.add(basename)
 
-    def extend(self, ext_list):
-        """Extend this Extension List with the passed in List"""
-        for e in ext_list:
-            self.append(e)
+    def update(self, raw_other):
+        """Update this Extension List with the passed in List()"""
+        other = raw_other
+        if isinstance(raw_other, ExtensionList):
+            other = raw_other.extensions.values()
+        for v in other:
+            self.add(v)
 
-    def update_extensions(self, ExtList):
-        for k,v in ExtList.extensions.items():
-            self.add_extension(v)
-
-    def discard_extension(self, raw_ext):
-        if raw_ext is None:
+    def discard(self, ext):
+        if ext is None:
             return
+        raw_ext = ext
+        if not isinstance(raw_ext, Extension):
+            raw_ext = Extension(ext.strip())
         basename = self.make_basename(raw_ext.name)
         tczname = self.make_tczname(raw_ext.name)
         self.extension_bases.discard(basename)
         if tczname in self.extensions:
             del self.extensions[tczname]
 
-    def discard(self, ext):
-        raw_ext = Extension(ext)
-        self.discard_extension(raw_ext)
+    def download_extension(self, ext, dest_dir):
+        """Download requested extension from self.mirror
 
-    def download_extension(self, raw_ext):
-        mirror = "/".join(self.mirror, self.version += ".x", self.arch, "tcz")
-        pass # download all related extension files from self.mirror
+        Args:
+            raw_ext: extension to download
+            dest_dir: directory to save the extension
 
-    def extend_deps(self, raw_ext):
-        if raw_ext.exists: # nope. wrong. Nothing to check and say we're done actually...
-            return
-        pass # read in the raw_ext .dep file (if .exists), and extend the List with it
+        Returns:
+            Bool: True if downloaded, False if error
+        """
+        from os.path import join, isdir, isfile
+        if ext is None or not isinstance(ext, Extension):
+            return False
+        if not isdir(dest_dir):
+            return False
+
+        def download_file(url, filename):
+            if url is None or filename is None:
+                return False
+            import urllib.request
+            import shutil
+            from urllib.error import URLError
+            try:
+                with \
+                    urllib.request.urlopen(url) as response, \
+                    open(filename, 'wb') as out_file\
+                :
+                    shutil.copyfileobj(response, out_file)
+            except URLError:
+                return False
+            if not isfile(filename):
+                return False
+            return True
+
+        def download_files(url, path):
+            # .dep is optional, extension and .md5.txt are required
+            download_file(url + '.dep', path + '.dep')
+
+            if (
+                not download_file(url, path) or
+                not download_file(url + '.md5.txt', path + '.md5.txt')
+            ):
+                return False
+            return True
+
+        def checksum_files(path):
+            if not isfile(path) and not isfile(path + '.md5.txt'):
+                return False
+            # If no md5sum in path, accept it as-is and move on
+            if (
+                subprocess.run(['md5sum', '--version'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                ).returncode != 0
+            ):
+                return True
+            # Tiny Core uses '-s' for don't output anything, most everything
+            # else uses '--status'. So don't pass either and just hide
+            # stdout/stderr. the return code still shows result
+            res = subprocess.run(['md5sum', '-c', path + '.md5.txt'],
+                cwd=dirname(path),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            if (res.returncode == 0):
+                return True
+            return False
+
+        mirror = "/".join([
+            self.mirror.strip("/"),
+            self.version + ".x",
+            self.arch,
+            "tcz"
+        ])
+        tczurl = "/".join([mirror, ext.name])
+        tczpath = join(dest_dir, ext.name)
+
+        # Download & checksum, if failed, try one more time.
+        download_files(tczurl, tczpath)
+        if checksum_files(tczpath):
+            ext.update_path(dest_dir)
+            return True
+        download_files(tczurl, tczpath)
+        if checksum_files(tczpath):
+            ext.update_path(dest_dir)
+            return True
+        return False
+
+    def update_with_deps(self, raw_ext):
+        """Update list with dependencies from .dep file
+
+        Args:
+            raw_ext: the Extension to read deps for
+
+        Returns:
+            Bool: True if successful, False if error
+        """
+        if (
+            raw_ext is None or
+            not isinstance(raw_ext, Extension) or
+            not raw_ext.exists
+        ):
+            return False
+        from os.path import join, isfile
+        dep = join(raw_ext.full_path(), ".dep")
+        deps = set()
+        # If there is no .dep file, then this extension has no deps
+        if not isfile(dep):
+            return True
+        with open(dep) as f:
+            for line in f:
+                new_dep = line.strip()
+                if new_dep == "":
+                    continue
+                deps.add(new_dep)
+        self.update(deps)
+        return True
+
+    def localize_all_deps(self, dirs, dest_dir):
+        """Get local absolute dereferenced paths to all needed extensions
+
+        Identify absolute dereferenced path to an extension, and pull in any
+        dependencies found in its .dep file as well
+
+        Args:
+            dirs: list of directories to search for extensions from this list
+            dest_dir: location to download any non-local extensions
+
+        Returns:
+            Bool: True if all found, False if error or any not found
+        """
+        # seed needed with the current full set of extension names
+        needed = set(self.extensions.keys())
+        for t_dir in dirs:
+            # Search each directory for our needed extensions
+            for e in sorted(needed.copy()):
+                ext = self.extensions[e]
+                # If we have a path for this one, we don't need to find it.
+                if ext.exists:
+                    needed.discard(ext.name)
+                    continue
+                # If it isn't available at this path, move on
+                if not ext.update_path(t_dir):
+                    continue
+                # Add any dependencies of this extension to the list
+                print("Found {0} in {1}\n".format(ext.name, t_dir))
+                self.update_with_deps(ext)
+                needed.discard(ext.name)
+        for e in needed:
+            ext = self.extensions[e]
+            print(
+                "Downloading {0} from {1}\n".format(
+                    ext.name, self.mirror)
+            )
+            if not self.download_extension(ext, dest_dir):
+                print("\nERROR: extension {0} was ".format(ext.name) +
+                    "not found locally and could not be downloaded\n"
+                )
+                return False
+        if len(needed) >= 1:
+            return self.localize_all_deps(dirs, dest_dir)
+        return True
 
 def existing_dir(value):
     """verify argument is or references an existing directory.
@@ -268,6 +421,9 @@ def get_options(argv=None):
     opts.add_argument(
         "--tinycore-kernel", "-k",
         help="Tiny Core Kernel Version to build against")
+    opts.add_argument(
+        "--tinycore-mirror", "-m",
+        help="Tiny Core Kernel Mirror to download from")
 
     # TODO(cmoye) change default to False once the code supports it (version 2+)
     #~ opts.add_argument(
@@ -277,12 +433,10 @@ def get_options(argv=None):
         #~ "--copy2fs", "-c", nargs="*",
         #~ help="Create 'copy2fs.lst' to force copy install for given extensions")
 
-    # add default=//path/to/tce/optional/
-    #~ opts.add_argument(
-        #~ "--extensions-local-dir", "-e", type=existing_dir, nargs="*",
-        #~ default=['/tce/optional/upgrades/', '/tce/optional/'],
-        #~ help="Specify locally mounted locations to find extensions"
-    #~ )
+    opts.add_argument(
+        "--extensions-local-dir", "-e", type=existing_dir, nargs="*",
+        help="Specify locally mounted locations to find extensions"
+    )
     #~ opts.add_argument(
         #~ "--remote-extensions", "-E", nargs="*",
         #~ help="Specify wget-able extension storage locations to search"
@@ -344,35 +498,37 @@ def read_configuration(args):
 
     # Add the args to the config
     for k,v in vars(args).items():
-        if v is not None:
+        if k == "extensions_local_dir" and v is not None:
+            config[i][k] = ",".join([",".join(v), config[i][k]])
+        elif v is not None:
             config[i][k] = str(v)
 
     # Update TC kernel and info if needed
     tc_release = '/usr/share/doc/tc/release.txt'
-    if ("tinycore-version" not in config[i] or
-        config[i]["tinycore-version"] is None
+    if ("tinycore_version" not in config[i] or
+        config[i]["tinycore_version"] is None
     ):
         # Default to TC 7.x
-        config[i]["tinycore-version"] = "7"
+        config[i]["tinycore_version"] = "7"
         if isfile(tc_release):
             with open(tc_release) as f:
                 for line in f:
                     tc_version = line.strip()
                     if tc_version == "":
                         continue
-                    config[i]["tinycore-version"] = tc_version.split('.')[0]
-    if ("tinycore-arch" not in config[i] or
-        config[i]["tinycore-arch"] is None
+                    config[i]["tinycore_version"] = tc_version.split('.')[0]
+    if ("tinycore_arch" not in config[i] or
+        config[i]["tinycore_arch"] is None
     ):
         # Default to x86 (over x86_64)
-        config[i]["tinycore-arch"] = "x86"
+        config[i]["tinycore_arch"] = "x86"
         if isfile(tc_release):
             shell = abspath(expandvars(realpath('/bin/sh')))
-            config[i]["tinycore-arch"] = \
+            config[i]["tinycore_arch"] = \
                 subprocess.run(['file', shell],
                     check=True, stdout=subprocess.PIPE
                 ).stdout
-    kernel = Extension.tc_kernel(config[i]["tinycore-version"], config[i]["tinycore-arch"])
+    kernel = ExtensionList.tc_kernel(config[i]["tinycore_version"], config[i]["tinycore_arch"])
     if isfile(tc_release):
         kernel = \
             subprocess.run(['uname', '-r'],
@@ -380,18 +536,21 @@ def read_configuration(args):
             ).stdout
 
     if (kernel is None and
-        ("tinycore-kernel" not in config[i] or
-        config[i]["tinycore-kernel"] is None)
+        ("tinycore_kernel" not in config[i] or
+        config[i]["tinycore_kernel"] is None)
     ):
         return None
-    config[i]["tinycore-kernel"] = kernel
+    config[i]["tinycore_kernel"] = kernel
+
+    if "tinycore_mirror" not in config[i] or config[i]["tinycore_mirror"] is None:
+        config[i]["tinycore_mirror"] = "http://tinycorelinux.net"
 
     # if no output, base off config filename, tc-version & arch, and curdir
     out_file = splitext(basename(config[i]["config"]))[0]
     out_file = "".join([
         out_file,
-        "-",config[i]["tinycore-version"],
-        "-",config[i]["tinycore-arch"],
+        "-",config[i]["tinycore_version"],
+        "-",config[i]["tinycore_arch"],
         ".gz"
     ])
     if "output" not in config[i]:
@@ -411,69 +570,6 @@ def read_configuration(args):
 
     return config
 
-def disable_sigpipe():
-    import signal
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-
-def _call_output(command, throw=False):
-    import subprocess
-    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
-                     stderr=subprocess.STDOUT, preexec_fn=disable_sigpipe)
-    stdout = proc.communicate()[0]
-    res = proc.returncode
-    if throw and res:
-        raise Exception("Failed call to '%s'" % (command))
-    return stdout
-
-def static_var(varname, value):
-    def decorate(func):
-        setattr(func, varname, value)
-        return func
-    return decorate
-
-def download_file(url, filename):
-    if url is none or filename is none:
-        return False
-    import urlib.request
-    import shutil
-    with urllib.request.urlopen(url) as response, open(filename, 'wb') as out_file:
-        shutil.copyfileobj(response, out_file)
-
-def download_dot_dep(url,extension):
-    if url is none or filename is none:
-        return False
-    # Need a TC Mirror to use...
-
-# TODO: remove extensionize_names() if we use ExtensionList instead
-@static_var("kernel", "")
-def extensionize_names(extensions):
-    """Update a set of extensions names
-
-    Make sure each name ends in .tcz
-    Replace 'KERNEL' with current kernel version
-
-    Args:
-        extensions: a set of extension names
-    Returns:
-        extensions: set of potentially valid tcz extension names
-    """
-    if extensionize_names.kernel == "":
-        #build_dependency_tree.kernel = "3.0.21-tinycore"
-        extensionize_names.kernel = _call_output('uname -r').strip()
-    for raw_ext in extensions.copy():
-        safe_ext = raw_ext.replace("KERNEL", extensionize_names.kernel).strip()
-        if safe_ext == "":
-            extensions.discard(raw_ext)
-            continue
-        if not safe_ext.endswith(".tcz"):
-            safe_ext += ".tcz"
-        if safe_ext == raw_ext:
-            continue
-        extensions.discard(raw_ext)
-        extensions.add(safe_ext)
-    return extensions
-
-@static_var("kernel", "")
 def recursive_dirs(dirs):
     """Get subdirs for given dirs
 
@@ -484,128 +580,35 @@ def recursive_dirs(dirs):
     Returns:
         set: abspath of initial directories and subdirs with symlinks dereferenced
     """
-    from os import listdir
+    import re
+    from os import walk
     from os.path import join
-    if recursive_dirs.kernel == "":
-        recursive_dirs.kernel = _call_output('uname -r').strip()
-    raw_dirs = set(dirs)
-    safe_dirs = set()
-    for raw_dir in raw_dirs.copy():
+    from collections import OrderedDict
+    kernel = re.compile('linux-[0-9.]+')
+    hidden = re.compile('^\.')
+    safe_dirs = OrderedDict()
+    all_dirs = []
+    for raw_dir in dirs.copy():
         safe_dir = realpath(abspath(expandvars(raw_dir)))
         if not isdir(safe_dir):
-            raw_dirs.remove(raw_dir)
             continue
-        safe_dirs.add(safe_dir)
-        new_dirs = [join(safe_dir,datum) for datum in listdir(safe_dir) if datum != recursive_dirs.kernel]
-        raw_dirs.remove(raw_dir)
-        safe_dirs.update(recursive_dirs(new_dirs))
-    return safe_dirs
+        safe_dirs[safe_dir] = 1
 
-# TODO: remove demote() if we don't use tce-load anymore
-def demote(user_uid, user_gid):
-    def result():
-        from os import setgid, setuid
-        setgid(user_gid)
-        setuid(user_uid)
-    return result
-
-def get_dot_deps(dep):
-    """read in dependencies from .dep file
-
-    Args:
-        extension: the dep file for an extension to read
-
-    Returns:
-        set: unique dependent extensions
-    """
-    #
-    #from os.path import isfile
-    if not dep.endswith(".dep"):
-        dep += ".dep"
-    deps = set()
-    if not isfile(dep):
-        return deps
-    with open(dep) as f:
-        for line in f:
-            new_dep = line.strip()
-            if new_dep == "":
-                continue
-            deps.add(new_dep)
-    #~ try:
-        #~
-        #~ deps.update([line.strip() for line in open(dep)])
-        #~ close(dep)
-    #~ except:
-        #~ return deps
-        #~ #pass
-    deps = extensionize_names(deps)
-    return deps
-
-def get_deps(dirs, extensions, path_exts=None):
-    """Get absolute dereferenced paths to all needed extensions
-
-    Identify absolute dereferenced path to an extension, and pull in any
-    dependencies found in its .dep file as well
-
-    Args:
-        dirs: list of directories to search for extensions
-        extensions: set of extensions(s) to locate
-        path_exts: internal dictionary for keeping up with which extensions
-            have been found so far
-
-    Returns:
-        set: absolute paths to all needed extensions
-    """
-    from os.path import basename, join
-    from os import getuid, devnull
-
-    if path_exts == None:
-        path_exts = {}
-    extensions.discard("")
-    for raw_ext in extensions.copy():
-        raw_ext.strip()
-        if raw_ext in path_exts:
-            continue
-        if raw_ext == "":
-            continue
-        # Can't run tce-load as root user, so demote this call if needed
-        with open(devnull, 'w') as FNULL:
-            #FNULL = open(devnull, 'w')
-            dl_cmd = ['tce-load', '-w', raw_ext]
-            if (getuid() == 0):
-                # these are the default values for tc:staff in TC
-                # not 100% sure we need to modify the gid to work...
-                subprocess.call(dl_cmd, stdout=FNULL, preexec_fn=demote(1001,50))
-            else:
-                subprocess.call(dl_cmd, stdout=FNULL)
-
-        for t_dir in dirs:
-            path_ext = join(t_dir, raw_ext)
-            if not isfile(path_ext):
-                continue
-            path_exts[raw_ext] = path_ext
-            dep = path_ext + ".dep"
-            if isfile(dep):
-                extensions.update(get_dot_deps(dep))
-            break
-        else:
-            # Need to fail here, because we never found the extension
-            print("\n\nERROR: Could not find extension: ", raw_ext,"\n")
-            exit(1)
-    # If we're done: return complete deps list;
-    # or send it deeper
-    if (len(path_exts) != len(extensions)):
-        return get_deps(dirs, extensions, path_exts)
-    extensions.clear()
-    for ext in path_exts.itervalues():
-        extensions.add(ext)
-    return extensions
+    for safe_dir in safe_dirs.keys():
+        for root,d,f in walk(safe_dir, followlinks=True):
+            all_dirs.append(root)
+            for name in d:
+                if re.match(kernel,name) or re.match(hidden,name):
+                    d.remove(name)
+                    continue
+                all_dirs.append(join([root,name]))
+    return all_dirs
 
 def mkdir_p(path):
     # https://stackoverflow.com/questions/600268/mkdir-p-functionality-in-python
     import os, errno
     try:
-        os.makedirs(path)
+        os.makedirs(path, exist_ok=True) # Python >=3.2
     except OSError as exc: # Python >2.5
         if exc.errno == errno.EEXIST and os.path.isdir(path):
             pass
@@ -637,14 +640,13 @@ def write_copy2fs(copy2fs_exts, path):
         return
 
     print("Writing copy2fs.lst")
-    #extensions = copy2fs_exts.split(',')
     with open(copy2fs, 'w') as f:
-        #for ext in extensions:
         for ext in copy2fs_exts:
             f.write('{0}\n'.format(ext))
 
+# TODO: update to subprocess.run()
 def tc_bundle_path(dir_path, bundle):
-    # cd dir_path; sudo find|sudo cpio -v -o -H newc|gzip -2 -v > bundle
+    # cd dir_path; find|cpio -v -o -H newc|gzip -2 -v > bundle
     # advdef -z4 bundle
     from os.path import join
     from subprocess import Popen, PIPE
@@ -655,15 +657,15 @@ def tc_bundle_path(dir_path, bundle):
     print("Packaging the init image, this can take a few moments...")
     retcode = 1
     # Make sure the top level directory has correct permissions
-    subprocess.call(['sudo', 'chown', 'root:', dir_path])
-    subprocess.call(['sudo', 'chmod', '0755', dir_path])
+    subprocess.call(['chown', 'root:', dir_path])
+    subprocess.call(['chmod', '0755', dir_path])
     dir_home = join(dir_path, 'home/tc')
     if (isdir(dir_home)):
-        subprocess.call(['sudo', 'chown', '1001:50', dir_home])
+        subprocess.call(['chown', '1001:50', dir_home])
     with open(bundle, 'w') as f:
-        find = Popen(['sudo', 'find'], cwd=dir_path, stdout=PIPE)
+        find = Popen(['find'], cwd=dir_path, stdout=PIPE)
         cpio = Popen(
-            ['sudo','cpio','-mo','-H','newc'],
+            ['cpio','-mo','-H','newc'],
             cwd=dir_path, stdin=find.stdout, stdout=PIPE
         )
         gzip = Popen(['gzip', '-{}'.format(gzip_lvl)],
@@ -682,6 +684,7 @@ def tc_bundle_path(dir_path, bundle):
         subprocess.call(['advdef', '-z4', bundle])
     print("\nProcessed config into initrd file:\n\n    {0}\n".format(bundle))
 
+# TODO: update to subprocess.run() or maybe shutil.copy2
 def copy_extensions(dir_path, extensions):
     # Copy .tcz, .tcz.dep, .tcz.md5.txt, .tcz.list, and .tcz.info
     for ext in extensions:
@@ -690,6 +693,7 @@ def copy_extensions(dir_path, extensions):
             format(ext, dir_path),
             shell=True)
 
+# TODO: update to subprocess.run() or maybe shutil.copy2
 def copy_backup(raw_data, work_dir):
     from os.path import join, basename
     data_file = abspath(realpath(raw_data))
@@ -697,7 +701,7 @@ def copy_backup(raw_data, work_dir):
         return 1
     if (
         0 == subprocess.call(
-            ['sudo', 'cp', '-fp',
+            ['cp', '-fp',
             data_file,
             join(work_dir, 'mydata.tgz')]
         )
@@ -705,6 +709,7 @@ def copy_backup(raw_data, work_dir):
         return 0
     return 1
 
+# TODO: update to subprocess.run()
 def extract_core(raw_core_path, work_dir):
     """Extract a core.gz into work directory
 
@@ -713,22 +718,13 @@ def extract_core(raw_core_path, work_dir):
         work_dir: path to work_root
     """
     from subprocess import Popen, PIPE
-    from os import getuid
-    #~ if (getuid() != 0):
-        #~ print("ERROR: extracting initrd requires super user permissions")
-        #~ return 1
     safe_core_path = realpath(abspath(expandvars(raw_core_path)))
     if not isfile(safe_core_path):
         print("initrd file not found: {}".format(safe_core_path))
         return 1
-    #zcat safe_core_path | sudo cpio -i -H newc -d -p work_dir;
-    #~ subprocess.call(
-        #~ 'zcat {0} | sudo cpio -i -H newc -d'.format(safe_core_path),
-        #~ cwd=work_dir, shell=True
-    #~ )
     zcat = Popen(['zcat', safe_core_path], stdout=PIPE)
     cpio = Popen(
-        ['sudo','cpio','-mi','-H','newc','-d'],
+        ['cpio','-mi','-H','newc','-d'],
         cwd=work_dir, stdin=zcat.stdout, stdout=PIPE, stderr=PIPE
     )
     # Allow zcat to receive a SIGPIPE if cpio exits.
@@ -751,15 +747,6 @@ def extract_core(raw_core_path, work_dir):
     # TODO (chazzam) determine if the extraction succeeded
     return retcode
 
-def sudo_rmtree(path):
-    """remove a path with sudo permissions
-
-    Args:
-        path: the path to delete
-    """
-    import subprocess
-    subprocess.call(['sudo', 'rm', '-rf', path])
-
 def main(argv=None):
     """Main function of script.
 
@@ -767,8 +754,9 @@ def main(argv=None):
     needed to build initrd image for booting with the needed file structure
     """
     from sys import argv as sys_argv
-    from tempfile import mkdtemp
+    from tempfile import mkdtemp, TemporaryDirectory
     from os.path import join, basename
+    from os import geteuid
 
     if argv is None:
         argv = sys_argv
@@ -782,40 +770,51 @@ def main(argv=None):
     if config is None:
         print("\n\nERROR: Could not process configuration file\n")
         return 1
+
+    if (
+        not config.getboolean("install", "dry_run") and
+        geteuid() != 0
+    ):
+        print("\n\nERROR: Must run as super-user if not a dry-run\n")
+        return 1
+
     # Build current list of extensions (extensions + onboot)
-    extension_list = ExtensionList(config["install"]["tinycore-kernel"])
-    onboot_list = ExtensionList(config["install"]["tinycore-kernel"])
-    copy2fs_list = ExtensionList(config["install"]["tinycore-kernel"])
+    extlist_args = {
+        'version': config["install"]["tinycore_version"],
+        'arch': config["install"]["tinycore_arch"],
+        'kernel': config["install"]["tinycore_kernel"],
+        'mirror': config["install"]["tinycore_mirror"]
+    }
+
+    extension_list = ExtensionList(**extlist_args)
+    onboot_list = ExtensionList(**extlist_args)
+    copy2fs_list = ExtensionList(**extlist_args)
     if "extensions" in config["install"]:
-        extension_list.extend((config["install"]["extensions"]).split(','))
-        #extension_list = extensionize_names(extension_list)
+        extension_list.update((config["install"]["extensions"]).split(','))
     if "onboot" in config["install"]:
-        onboot_list.extend((config["install"]["onboot"]).split(','))
-        #onboot_list = extensionize_names(onboot_list)
-        extension_list.extend(onboot_list)
-        print("\nOnboot extensions:\n{0}".format(', '.join(sorted(onboot_list))))
+        onboot_list.update((config["install"]["onboot"]).split(','))
+        extension_list.update(onboot_list)
+        print("\nOnboot extensions:\n{0}".format(onboot_list))
     if "copy2fs" in config["install"]:
-        copy2fs_list.extend((config["install"]["copy2fs"]).split(','))
+        copy2fs_list.update((config["install"]["copy2fs"]).split(','))
         if not ( len(copy2fs_list) == 1 and
           ("all" in copy2fs_list or "flag" in copy2fs_list)
           ):
-            #copy2fs_list = extensionize_names(copy2fs_list)
-            extension_list.extend(copy2fs_list)
-    config["install"]["onboot"] = ','.join(onboot_list)
-    config["install"]["copy2fs"] = ','.join(copy2fs_list)
-    config["install"]["extensions"] = ','.join(extension_list)
+            extension_list.update(copy2fs_list)
+    config["install"]["onboot"] = str(onboot_list)
+    config["install"]["copy2fs"] = str(copy2fs_list)
+    config["install"]["extensions"] = str(extension_list)
     if "implicit_copy2fs" in config["install"]:
         # Don't include the implicit copy2fs extensions in the regular copy2fs
         # They are to be written to the copy2fs.lst, but not explicitly included
         # in the image.
-        implicit_list = ExtensionList(config["install"]["tinycore-kernel"])
-        implicit_list.extend(config["install"]["implicit_copy2fs"].split(','))
-        #implicit_list = extensionize_names(implicit_list)
-        config["install"]["implicit_copy2fs"] = ','.join(implicit_list)
+        implicit_list = ExtensionList(**extlist_args)
+        implicit_list.update(config["install"]["implicit_copy2fs"].split(','))
+        config["install"]["implicit_copy2fs"] = str(implicit_list)
         # We do want to print the implicit copy2fs extensions though, so update it now
-        copy2fs_list.extend(implicit_list)
+        copy2fs_list.update(implicit_list)
     if len(copy2fs_list) > 0:
-        print("\nCopy to filesystem extensions:\n{0}".format(', '.join(sorted(copy2fs_list))))
+        print("\nCopy to filesystem extensions:\n{0}".format(str(copy2fs_list)))
 
     # Setup directory list default for extension searching
     dir_list = []
@@ -823,45 +822,32 @@ def main(argv=None):
         dir_list = config["install"]["extensions_local_dir"].split(',')
     if isfile('/usr/share/doc/tc/release.txt'):
         # Append the system extension directory if running on a TC system
-        dir_list.append(
+        dir_list.extend([
             '/etc/sysconfig/tcedir/optional/upgrades',
             '/etc/sysconfig/tcedir/optional/'
-        )
+        ])
     config["install"]["extensions_local_dir"] = ','.join(dir_list)
 
-    # Need to verify all of them end in .tcz
-    # Need to build an absolute path to all of the extensions
-    # Recursively determine all dependencies
-        # Assume any extension in a local dir will have its .dep if it exists.
-        # If any extension is never found, try to tce-load -w it
-        # If still can't get an absolute path to everything, fail.
     # Build out the recursive list of directories to search now.
     print("\nBuilding recursive directory list...")
-    safe_dirs = []
-    for dir in dir_list:
-        raw_dirs = recursive_dirs([dir])
-        if len(raw_dirs) == 0:
-            continue
-        safe_dirs.extend(raw_dirs)
-    # Get a flattened list of needed extensions
+    safe_dirs = recursive_dirs(dir_list)
     print("Locating all extensions and dependencies...")
-    import pdb;pdb.set_trace()
-    extension_list = get_deps(safe_dirs, extension_list)
-    print("\nIncluding extensions:\n{0}\n".format(
-        ', '.join(sorted([basename(ext) for ext in extension_list]))
-    ))
 
-    if ("dry_run" in config["install"] and
-        config.getboolean("install", "dry_run")
-    ):
-        return 0
-
-    work_root = mkdtemp(prefix="remaster")
-    work_dir = join(work_root, config["install"]["install_root"].lstrip('/'))
+    # Create temp working directory for install
+    work_root = TemporaryDirectory(prefix="remaster-") # Python >= 3.2
+    work_dir = join(work_root.name, config["install"]["install_root"].lstrip('/'))
     work_install = join(work_dir, "optional/")
-    # Create temp working directory for install, mkdir -p install_root 'tce'
     # setup folder structure within temp dir
     mkdir_p(work_install)
+
+    search_dirs = [work_install]
+    search_dirs.extend(safe_dirs)
+    if not extension_list.localize_all_deps(search_dirs, work_install):
+        return 1
+    print("\nIncluding extensions:\n{0}\n".format(extension_list))
+
+    if config.getboolean("install", "dry_run"):
+        return 0
 
     # TODO (chazzam) verify the value is boolean, set false if not
     if "expand_tcz" not in config["install"]:
@@ -871,7 +857,7 @@ def main(argv=None):
     if "combined_init" in config["install"]:
         # TODO (chazzam) check the output and verify this succeeds.
         raw_init_path = config["install"]["combined_init"]
-        ret = extract_core(raw_init_path, work_root)
+        ret = extract_core(raw_init_path, work_root.name)
         if ret != 0:
             return 1
     if config.getboolean("install", "expand_tcz"):
@@ -888,8 +874,7 @@ def main(argv=None):
         copy_backup(config["install"]["mydata"], work_dir)
     # squashfs the needful
     # gzip and advdef if it possible
-    tc_bundle_path(work_root, config["install"]["output"])
-    sudo_rmtree(work_root)
+    tc_bundle_path(work_root.name, config["install"]["output"])
     return 0
 
 """allow unit testing and single exit point.
