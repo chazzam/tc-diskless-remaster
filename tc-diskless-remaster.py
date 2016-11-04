@@ -2,13 +2,11 @@
 """
 Remaster a TinyCore for diskless operation
 """
-import subprocess
-#import re
-#~ import getpass, os.path, pickle, cStringIO, sys
-#~ from termios import tcflush, TCIFLUSH
-from os.path import \
-    isfile, isdir, dirname, expanduser, realpath, expandvars, abspath
-import configparser
+import argparse, collections, configparser
+# import errno
+import os, os.path, re
+import shutil, subprocess, sys, tempfile
+import urllib.error, urllib.request
 
 # Update to not managing tc-ext-tools at all, support a flag to specify a location
 # in which to search for extensions beyond the normal installed directory.
@@ -23,12 +21,12 @@ import configparser
 class Extension:
     """Tiny Core Extension"""
     def __init__(self, fullname):
-        from os.path import dirname, basename
         # Get the filename before dereferencing symlinks
-        self.name = basename(Extension.extensionize(fullname.strip()))
+        self.name = os.path.basename(
+            Extension.extensionize(fullname.strip()))
         self.path = ""
         self.exists = False
-        self.update_path(dirname(fullname.strip()))
+        self.update_path(os.path.dirname(fullname.strip()))
         self.depof = None
 
     def __str__(self):
@@ -44,12 +42,12 @@ class Extension:
         return name
 
     def update_path(self, path):
-        from os.path import join, isdir, isfile
         if path is None or path == "":
             return False
-        path = abspath(realpath(expandvars(path)))
-        fullpath = join(path, self.name)
-        if not isdir(path) or not isfile(fullpath):
+        path = os.path.abspath(
+            os.path.realpath(os.path.expandvars(path)))
+        fullpath = os.path.join(path, self.name)
+        if not os.path.isdir(path) or not os.path.isfile(fullpath):
             return False
         self.exists = True
         self.path = path
@@ -57,15 +55,13 @@ class Extension:
 
     def full_path(self):
         """return the full path"""
-        from os.path import join
-        fullpath = join(self.path, self.name)
+        fullpath = os.path.join(self.path, self.name)
         if self.path == "":
             fullpath = self.name
         return fullpath
 
 class ExtensionList:
     """Tiny Core Extension List"""
-    import re
     _re_KERNEL = re.compile('KERNEL')
 
     @staticmethod
@@ -95,7 +91,7 @@ class ExtensionList:
         self.arch = arch.strip()
         self._kernel_re = None
         self.extensions = dict()
-        self.extension_bases = set()
+        self.extension_depnames = set()
 
         # Update Kernel if needed.
         kernel = ExtensionList.tc_kernel(version, arch)
@@ -119,14 +115,12 @@ class ExtensionList:
         tczname = self.make_tczname(raw_name)
         return tczname in self.extensions
 
-    def make_basename(self, name):
-        import re
+    def make_depname(self, name):
         if self._kernel_re is None:
             self._kernel_re = re.compile(self.kernel)
         return re.sub(self._kernel_re, 'KERNEL', name.strip())
 
     def make_tczname(self, name):
-        import re
         return re.sub(ExtensionList._re_KERNEL, self.kernel, name.strip())
 
     def add(self, raw_ext):
@@ -138,16 +132,17 @@ class ExtensionList:
         if raw_ext.name == "":
             return
         safe_ext = raw_ext
-        basename = self.make_basename(safe_ext.name)
+        depname = self.make_depname(safe_ext.name)
         tczname = self.make_tczname(safe_ext.name)
-        if (
-            basename in self.extension_bases or
-            tczname in self.extensions
-        ):
+        #~ if (
+            #~ depname in self.extension_depnames or
+            #~ tczname in self.extensions
+        #~ ):
+        if tczname in self:
             return
         safe_ext.name = tczname
         self.extensions[tczname] = safe_ext
-        self.extension_bases.add(basename)
+        self.extension_depnames.add(depname)
 
     def update(self, raw_other):
         """Update this Extension List with the passed in List()"""
@@ -163,9 +158,9 @@ class ExtensionList:
         raw_ext = ext
         if not isinstance(raw_ext, Extension):
             raw_ext = Extension(ext.strip())
-        basename = self.make_basename(raw_ext.name)
+        depname = self.make_depname(raw_ext.name)
         tczname = self.make_tczname(raw_ext.name)
-        self.extension_bases.discard(basename)
+        self.extension_bases.discard(depname)
         if tczname in self.extensions:
             del self.extensions[tczname]
 
@@ -179,27 +174,23 @@ class ExtensionList:
         Returns:
             Bool: True if downloaded, False if error
         """
-        from os.path import join, isdir, isfile
         if ext is None or not isinstance(ext, Extension):
             return False
-        if not isdir(dest_dir):
+        if not os.path.isdir(dest_dir):
             return False
 
         def download_file(url, filename):
             if url is None or filename is None:
                 return False
-            import urllib.request
-            import shutil
-            from urllib.error import URLError
             try:
                 with \
                     urllib.request.urlopen(url) as response, \
                     open(filename, 'wb') as out_file\
                 :
                     shutil.copyfileobj(response, out_file)
-            except URLError:
+            except urllib.error.URLError:
                 return False
-            if not isfile(filename):
+            if not os.path.isfile(filename):
                 return False
             return True
 
@@ -215,7 +206,10 @@ class ExtensionList:
             return True
 
         def checksum_files(path):
-            if not isfile(path) and not isfile(path + '.md5.txt'):
+            if (
+                not os.path.isfile(path) and
+                not os.path.isfile(path + '.md5.txt')
+            ):
                 return False
             # If no md5sum in path, accept it as-is and move on
             if (
@@ -229,7 +223,7 @@ class ExtensionList:
             # else uses '--status'. So don't pass either and just hide
             # stdout/stderr. the return code still shows result
             res = subprocess.run(['md5sum', '-c', path + '.md5.txt'],
-                cwd=dirname(path),
+                cwd=os.path.dirname(path),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
@@ -244,7 +238,7 @@ class ExtensionList:
             "tcz"
         ])
         tczurl = "/".join([mirror, ext.name])
-        tczpath = join(dest_dir, ext.name)
+        tczpath = os.path.join(dest_dir, ext.name)
 
         # Download & checksum, if failed, try one more time.
         download_files(tczurl, tczpath)
@@ -272,11 +266,10 @@ class ExtensionList:
             not raw_ext.exists
         ):
             return False
-        from os.path import join, isfile
-        dep = join(raw_ext.full_path(), ".dep")
+        dep = os.path.join(raw_ext.full_path(), ".dep")
         deps = set()
         # If there is no .dep file, then this extension has no deps
-        if not isfile(dep):
+        if not os.path.isfile(dep):
             return True
         with open(dep) as f:
             for line in f:
@@ -314,13 +307,13 @@ class ExtensionList:
                 if not ext.update_path(t_dir):
                     continue
                 # Add any dependencies of this extension to the list
-                print("Found {0} in {1}\n".format(ext.name, t_dir))
+                print("Found {0} in {1}".format(ext.name, t_dir))
                 self.update_with_deps(ext)
                 needed.discard(ext.name)
         for e in needed:
             ext = self.extensions[e]
             print(
-                "Downloading {0} from {1}\n".format(
+                "Downloading {0} from {1}".format(
                     ext.name, self.mirror)
             )
             if not self.download_extension(ext, dest_dir):
@@ -357,8 +350,12 @@ def existing_dir(value):
             already existing directories, and optionally a filename that may or
             may not exist
     """
-    dir_name = dirname(value)
-    is_dir = isdir(value) or isdir(dir_name) or dir_name == ""
+    dir_name = os.path.dirname(value)
+    is_dir = (
+        os.path.isdir(value) or
+        os.path.isdir(dir_name) or
+        dir_name == ""
+    )
     if value == "" or not is_dir:
         argparse.ArgumentTypeError(
             "Must specify an existing directory for input/output")
@@ -386,7 +383,7 @@ def existing_file(value):
         ArgumentTypeError: If the path cannot be determined to consist of an
             already existing file
     """
-    is_file = isfile(value)
+    is_file = os.path.isfile(value)
     if value == "" or not is_file:
         argparse.ArgumentTypeError(
             "Must specify an existing file for input")
@@ -397,8 +394,6 @@ def get_options(argv=None):
 
     Check for all supported flags and do any available pre-processing
     """
-    import argparse # Requires python 2.7 or newer
-
     default_config = "remaster.cfg"
     opts = argparse.ArgumentParser(
         description='Provide an initrd image to boot with tinycore.')
@@ -484,8 +479,6 @@ def read_configuration(args):
 
     Pull in any relevant command-line parameters that should be stored for later
     """
-    from os.path import basename, splitext
-    from os.path import join as path_join
     config = configparser.ConfigParser()
     try:
         config.read(vars(args)['config'])
@@ -510,7 +503,7 @@ def read_configuration(args):
     ):
         # Default to TC 7.x
         config[i]["tinycore_version"] = "7"
-        if isfile(tc_release):
+        if os.path.isfile(tc_release):
             with open(tc_release) as f:
                 for line in f:
                     tc_version = line.strip()
@@ -522,14 +515,16 @@ def read_configuration(args):
     ):
         # Default to x86 (over x86_64)
         config[i]["tinycore_arch"] = "x86"
-        if isfile(tc_release):
-            shell = abspath(expandvars(realpath('/bin/sh')))
+        if os.path.isfile(tc_release):
+            shell = os.path.abspath(
+                os.path.expandvars(os.path.realpath('/bin/sh')))
             config[i]["tinycore_arch"] = \
                 subprocess.run(['file', shell],
                     check=True, stdout=subprocess.PIPE
                 ).stdout
-    kernel = ExtensionList.tc_kernel(config[i]["tinycore_version"], config[i]["tinycore_arch"])
-    if isfile(tc_release):
+    kernel = ExtensionList.tc_kernel(
+        config[i]["tinycore_version"], config[i]["tinycore_arch"])
+    if os.path.isfile(tc_release):
         kernel = \
             subprocess.run(['uname', '-r'],
                 check=True, stdout=subprocess.PIPE
@@ -546,7 +541,8 @@ def read_configuration(args):
         config[i]["tinycore_mirror"] = "http://tinycorelinux.net"
 
     # if no output, base off config filename, tc-version & arch, and curdir
-    out_file = splitext(basename(config[i]["config"]))[0]
+    out_file = os.path.splitext(
+        os.path.basename(config[i]["config"]))[0]
     out_file = "".join([
         out_file,
         "-",config[i]["tinycore_version"],
@@ -554,18 +550,21 @@ def read_configuration(args):
         ".gz"
     ])
     if "output" not in config[i]:
-        new_path = abspath(realpath(expandvars("./")))
-        new_out = path_join(new_path, out_file)
+        new_path = os.path.abspath(
+            os.path.realpath(os.path.expandvars("./")))
+        new_out = os.path.join(new_path, out_file)
         config[i]["output"] = new_out
-    elif isdir(config[i]["output"]):
+    elif os.path.isdir(config[i]["output"]):
         # just update the file-name
-        new_path = abspath(realpath(expandvars(config[i]["output"])))
-        new_out = path_join(new_path, out_file)
+        new_path = os.path.abspath(
+            os.path.realpath(os.path.expandvars(config[i]["output"])))
+        new_out = os.path.join(new_path, out_file)
         config[i]["output"] = new_out
     else:
         # otherwise, just make sure it's a full absolute path
         full_out = config[i]["output"]
-        full_out = abspath(realpath(expandvars(full_out)))
+        full_out = os.path.abspath(
+            os.path.realpath(os.path.expandvars(full_out)))
         config[i]["output"] = full_out
 
     return config
@@ -580,48 +579,43 @@ def recursive_dirs(dirs):
     Returns:
         set: abspath of initial directories and subdirs with symlinks dereferenced
     """
-    import re
-    from os import walk
-    from os.path import join
-    from collections import OrderedDict
     kernel = re.compile('linux-[0-9.]+')
     hidden = re.compile('^\.')
-    safe_dirs = OrderedDict()
+    safe_dirs = collections.OrderedDict()
     all_dirs = []
     for raw_dir in dirs.copy():
-        safe_dir = realpath(abspath(expandvars(raw_dir)))
-        if not isdir(safe_dir):
+        safe_dir = os.path.realpath(
+            os.path.abspath(os.path.expandvars(raw_dir)))
+        if not os.path.isdir(safe_dir):
             continue
         safe_dirs[safe_dir] = 1
 
     for safe_dir in safe_dirs.keys():
-        for root,d,f in walk(safe_dir, followlinks=True):
+        for root,d,f in os.walk(safe_dir, followlinks=True):
             all_dirs.append(root)
             for name in d:
                 if re.match(kernel,name) or re.match(hidden,name):
                     d.remove(name)
                     continue
-                all_dirs.append(join([root,name]))
+                all_dirs.append(os.path.join([root,name]))
     return all_dirs
 
 def mkdir_p(path):
     # https://stackoverflow.com/questions/600268/mkdir-p-functionality-in-python
-    import os, errno
-    try:
-        os.makedirs(path, exist_ok=True) # Python >=3.2
-    except OSError as exc: # Python >2.5
-        if exc.errno == errno.EEXIST and os.path.isdir(path):
-            pass
-        else: raise
+    os.makedirs(path, exist_ok=True) # Python >=3.2
+    #~ try:
+        #~ os.makedirs(path, exist_ok=True) # Python >=3.2
+    #~ except OSError as exc: # Python >2.5
+        #~ if exc.errno == errno.EEXIST and os.path.isdir(path):
+            #~ pass
+        #~ else: raise
 
 def write_onboot_lst(onboots, path):
     if len(onboots) == 0:
         return
 
-    from os.path import join
-
     print("Writing onboot.lst")
-    onboot_lst = join(path, 'onboot.lst')
+    onboot_lst = os.path.join(path, 'onboot.lst')
     with open(onboot_lst, 'w') as f:
         for ext in onboots:
             f.write('{0}\n'.format(ext))
@@ -630,9 +624,7 @@ def write_copy2fs(copy2fs_exts, path):
     if len(copy2fs_exts) == 0:
         return
 
-    from os.path import join
-
-    copy2fs = join(path, 'copy2fs.lst')
+    copy2fs = os.path.join(path, 'copy2fs.lst')
     if ("all" in copy2fs_exts) or ("flag" in copy2fs_exts):
         copy2fs.replace(".lst", ".flg")
         print("Creating copy2fs.flg")
@@ -648,8 +640,6 @@ def write_copy2fs(copy2fs_exts, path):
 def tc_bundle_path(dir_path, bundle):
     # cd dir_path; find|cpio -v -o -H newc|gzip -2 -v > bundle
     # advdef -z4 bundle
-    from os.path import join
-    from subprocess import Popen, PIPE
     gzip_lvl = 9
     subprocess.call(['mv', '-f', bundle, bundle + '.old'])
     if (subprocess.call('advdef >/dev/null 2>&1',shell=True) == 0):
@@ -659,16 +649,16 @@ def tc_bundle_path(dir_path, bundle):
     # Make sure the top level directory has correct permissions
     subprocess.call(['chown', 'root:', dir_path])
     subprocess.call(['chmod', '0755', dir_path])
-    dir_home = join(dir_path, 'home/tc')
-    if (isdir(dir_home)):
+    dir_home = os.path.join(dir_path, 'home/tc')
+    if (os.path.isdir(dir_home)):
         subprocess.call(['chown', '1001:50', dir_home])
     with open(bundle, 'w') as f:
-        find = Popen(['find'], cwd=dir_path, stdout=PIPE)
-        cpio = Popen(
-            ['cpio','-mo','-H','newc'],
-            cwd=dir_path, stdin=find.stdout, stdout=PIPE
+        find = subprocess.Popen(['find'], cwd=dir_path, stdout=subprocess.PIPE)
+        cpio = subprocess.Popen(
+            ['cpio','-o','-H','newc'],
+            cwd=dir_path, stdin=find.stdout, stdout=subprocess.PIPE
         )
-        gzip = Popen(['gzip', '-{}'.format(gzip_lvl)],
+        gzip = subprocess.Popen(['gzip', '-{}'.format(gzip_lvl)],
             cwd=dir_path, stdin=cpio.stdout, stdout=f
         )
         # Allow find to receive a SIGPIPE if cpio exits.
@@ -695,15 +685,14 @@ def copy_extensions(dir_path, extensions):
 
 # TODO: update to subprocess.run() or maybe shutil.copy2
 def copy_backup(raw_data, work_dir):
-    from os.path import join, basename
-    data_file = abspath(realpath(raw_data))
-    if not isfile(data_file):
+    data_file = os.path.abspath(os.path.realpath(raw_data))
+    if not os.path.isfile(data_file):
         return 1
     if (
         0 == subprocess.call(
             ['cp', '-fp',
             data_file,
-            join(work_dir, 'mydata.tgz')]
+            os.path.join(work_dir, 'mydata.tgz')]
         )
     ):
         return 0
@@ -717,15 +706,20 @@ def extract_core(raw_core_path, work_dir):
         raw_core_path: path to core.gz file to extract
         work_dir: path to work_root
     """
-    from subprocess import Popen, PIPE
-    safe_core_path = realpath(abspath(expandvars(raw_core_path)))
-    if not isfile(safe_core_path):
+    safe_core_path = os.path.abspath(
+        os.path.realpath(
+        os.path.expandvars(raw_core_path)))
+    if not os.path.isfile(safe_core_path):
         print("initrd file not found: {}".format(safe_core_path))
         return 1
-    zcat = Popen(['zcat', safe_core_path], stdout=PIPE)
-    cpio = Popen(
+    zcat = subprocess.Popen(
+        ['zcat', safe_core_path],
+        stdout=subprocess.PIPE
+    )
+    cpio = subprocess.Popen(
         ['cpio','-mi','-H','newc','-d'],
-        cwd=work_dir, stdin=zcat.stdout, stdout=PIPE, stderr=PIPE
+        cwd=work_dir, stdin=zcat.stdout,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
     # Allow zcat to receive a SIGPIPE if cpio exits.
     zcat.stdout.close()
@@ -737,8 +731,8 @@ def extract_core(raw_core_path, work_dir):
     """
     output=`dmesg | grep hda`
     # becomes
-    p1 = Popen(["dmesg"], stdout=PIPE)
-    p2 = Popen(["grep", "hda"], stdin=p1.stdout, stdout=PIPE)
+    p1 = subprocess.Popen(["dmesg"], stdout=subprocess.PIPE)
+    p2 = subprocess.Popen(["grep", "hda"], stdin=p1.stdout, stdout=subprocess.PIPE)
     p1.stdout.close()  # Allow p1 to receive a SIGPIPE if p2 exits.
     output = p2.communicate()[0]
     p1.wait() # don't make zombies
@@ -753,13 +747,8 @@ def main(argv=None):
     processes command line args, config file, and carries out operations
     needed to build initrd image for booting with the needed file structure
     """
-    from sys import argv as sys_argv
-    from tempfile import mkdtemp, TemporaryDirectory
-    from os.path import join, basename
-    from os import geteuid
-
     if argv is None:
-        argv = sys_argv
+        argv = sys.argv
     args = get_options(argv[1:])
     # Build the config object to pass around
     config = None
@@ -773,7 +762,7 @@ def main(argv=None):
 
     if (
         not config.getboolean("install", "dry_run") and
-        geteuid() != 0
+        os.geteuid() != 0
     ):
         print("\n\nERROR: Must run as super-user if not a dry-run\n")
         return 1
@@ -820,7 +809,7 @@ def main(argv=None):
     dir_list = []
     if "extensions_local_dir" in config["install"]:
         dir_list = config["install"]["extensions_local_dir"].split(',')
-    if isfile('/usr/share/doc/tc/release.txt'):
+    if os.path.isfile('/usr/share/doc/tc/release.txt'):
         # Append the system extension directory if running on a TC system
         dir_list.extend([
             '/etc/sysconfig/tcedir/optional/upgrades',
@@ -831,12 +820,15 @@ def main(argv=None):
     # Build out the recursive list of directories to search now.
     print("\nBuilding recursive directory list...")
     safe_dirs = recursive_dirs(dir_list)
-    print("Locating all extensions and dependencies...")
+    print("Locating all extensions and dependencies...\n")
 
     # Create temp working directory for install
-    work_root = TemporaryDirectory(prefix="remaster-") # Python >= 3.2
-    work_dir = join(work_root.name, config["install"]["install_root"].lstrip('/'))
-    work_install = join(work_dir, "optional/")
+    work_root = tempfile.TemporaryDirectory(prefix="remaster-") # Python >= 3.2
+    work_dir = os.path.join(
+        work_root.name,
+        config["install"]["install_root"].lstrip('/')
+    )
+    work_install = os.path.join(work_dir, "optional/")
     # setup folder structure within temp dir
     mkdir_p(work_install)
 
@@ -885,8 +877,7 @@ python interactive interpreter and allows unit testing
 calling sys.exit here may allow for single point of exit within the script
 """
 if __name__ == '__main__':
-    from sys import exit, hexversion
-    if hexversion < 0x03050000:
+    if sys.hexversion < 0x03050000:
         print("\n\nERROR: Requires Python 3.5.0 or newer\n")
-        exit(1)
-    exit(main())
+        sys.exit(1)
+    sys.exit(main())
