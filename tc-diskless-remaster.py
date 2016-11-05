@@ -134,10 +134,6 @@ class ExtensionList:
         safe_ext = raw_ext
         depname = self.make_depname(safe_ext.name)
         tczname = self.make_tczname(safe_ext.name)
-        #~ if (
-            #~ depname in self.extension_depnames or
-            #~ tczname in self.extensions
-        #~ ):
         if tczname in self:
             return
         safe_ext.name = tczname
@@ -266,7 +262,7 @@ class ExtensionList:
             not raw_ext.exists
         ):
             return False
-        dep = os.path.join(raw_ext.full_path(), ".dep")
+        dep = raw_ext.full_path() + ".dep"
         deps = set()
         # If there is no .dep file, then this extension has no deps
         if not os.path.isfile(dep):
@@ -549,23 +545,22 @@ def read_configuration(args):
         "-",config[i]["tinycore_arch"],
         ".gz"
     ])
-    if "output" not in config[i]:
+    out_dir = ""
+    if "output" in config[i]:
+        out_dir = os.path.abspath(
+            os.path.realpath(os.path.expandvars(config[i]["output"])))
+    if out_dir == "":
         new_path = os.path.abspath(
             os.path.realpath(os.path.expandvars("./")))
         new_out = os.path.join(new_path, out_file)
         config[i]["output"] = new_out
-    elif os.path.isdir(config[i]["output"]):
+    elif os.path.isdir(out_dir):
         # just update the file-name
-        new_path = os.path.abspath(
-            os.path.realpath(os.path.expandvars(config[i]["output"])))
-        new_out = os.path.join(new_path, out_file)
+        new_out = os.path.join(out_dir, out_file)
         config[i]["output"] = new_out
     else:
         # otherwise, just make sure it's a full absolute path
-        full_out = config[i]["output"]
-        full_out = os.path.abspath(
-            os.path.realpath(os.path.expandvars(full_out)))
-        config[i]["output"] = full_out
+        config[i]["output"] = out_dir
 
     return config
 
@@ -583,6 +578,7 @@ def recursive_dirs(dirs):
     hidden = re.compile('^\.')
     safe_dirs = collections.OrderedDict()
     all_dirs = []
+
     for raw_dir in dirs.copy():
         safe_dir = os.path.realpath(
             os.path.abspath(os.path.expandvars(raw_dir)))
@@ -603,12 +599,6 @@ def recursive_dirs(dirs):
 def mkdir_p(path):
     # https://stackoverflow.com/questions/600268/mkdir-p-functionality-in-python
     os.makedirs(path, exist_ok=True) # Python >=3.2
-    #~ try:
-        #~ os.makedirs(path, exist_ok=True) # Python >=3.2
-    #~ except OSError as exc: # Python >2.5
-        #~ if exc.errno == errno.EEXIST and os.path.isdir(path):
-            #~ pass
-        #~ else: raise
 
 def write_onboot_lst(onboots, path):
     if len(onboots) == 0:
