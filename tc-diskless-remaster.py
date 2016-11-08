@@ -92,6 +92,7 @@ class ExtensionList:
         self._kernel_re = None
         self.extensions = dict()
         self.extension_depnames = set()
+        self.excluded_extensions = set()
 
         # Update Kernel if needed.
         kernel = ExtensionList.tc_kernel(version, arch)
@@ -134,11 +135,31 @@ class ExtensionList:
         safe_ext = raw_ext
         depname = self.make_depname(safe_ext.name)
         tczname = self.make_tczname(safe_ext.name)
-        if tczname in self:
+        if tczname in self or tczname in self.excluded_extensions:
             return
         safe_ext.name = tczname
         self.extensions[tczname] = safe_ext
         self.extension_depnames.add(depname)
+
+    def exclude_extensions(self, raw_other):
+        other = raw_other
+        if isinstance(raw_other, ExtensionList):
+            other = raw_other.extensions.values()
+        exc_tcznames = set()
+        exc_depnames = set()
+        for e in other:
+            exc_depnames.add(self.make_depname(e))
+            exc_tcznames.add(self.make_tczname(e))
+        # remove excludes from the depname list
+        self.extension_depnames = \
+            self.extension_depnames.difference(exc_depnames)
+        # remove excludes from the extensions list, cheat by using set first
+        self.excluded_extensions.update(exc_tcznames)
+        set_exts=set(self.extensions.keys())
+        set_exts = set_exts.difference(self.excluded_extensions)
+        for e in self.extensions.copy().keys():
+            if e not in set_exts:
+                del self.extensions[e]
 
     def update(self, raw_other):
         """Update this Extension List with the passed in List()"""
@@ -261,12 +282,12 @@ class ExtensionList:
             not isinstance(raw_ext, Extension) or
             not raw_ext.exists
         ):
-            return False
+            return None
         dep = raw_ext.full_path() + ".dep"
         deps = set()
         # If there is no .dep file, then this extension has no deps
         if not os.path.isfile(dep):
-            return True
+            return deps
         with open(dep) as f:
             for line in f:
                 new_dep = line.strip()
@@ -274,7 +295,7 @@ class ExtensionList:
                     continue
                 deps.add(new_dep)
         self.update(deps)
-        return True
+        return deps
 
     def localize_all_deps(self, dirs, dest_dir):
         """Get local absolute dereferenced paths to all needed extensions
@@ -291,6 +312,7 @@ class ExtensionList:
         """
         # seed needed with the current full set of extension names
         needed = set(self.extensions.keys())
+        needed_next = set()
         for t_dir in dirs:
             # Search each directory for our needed extensions
             for e in sorted(needed.copy()):
@@ -304,7 +326,7 @@ class ExtensionList:
                     continue
                 # Add any dependencies of this extension to the list
                 print("Found {0} in {1}".format(ext.name, t_dir))
-                self.update_with_deps(ext)
+                needed_next.update(self.update_with_deps(ext))
                 needed.discard(ext.name)
         for e in needed:
             ext = self.extensions[e]
@@ -317,7 +339,8 @@ class ExtensionList:
                     "not found locally and could not be downloaded\n"
                 )
                 return False
-        if len(needed) >= 1:
+        needed_next.discard(None)
+        if len(needed) >= 1 or len(needed_next) >= 1:
             return self.localize_all_deps(dirs, dest_dir)
         return True
 
@@ -484,42 +507,51 @@ def read_configuration(args):
     i = "install"
     if i not in config:
         config[i] = {}
+    m = i
+    if "sections" in config[i]:
+        m = "DEFAULT"
 
     # Add the args to the config
     for k,v in vars(args).items():
         if k == "extensions_local_dir" and v is not None:
-            config[i][k] = ",".join([",".join(v), config[i][k]])
+            if k not in config[d] and k in config[i]:
+                config[d][k] = config[i][k]
+            elif k not in config[d] and k not in config[i]:
+                config[m][k] = ""
+            x = v.split(",")
+            x.extend(config[m][k].split(","))
+            config[m][k] = ",".join(x)
         elif v is not None:
-            config[i][k] = str(v)
+            config[m][k] = str(v)
 
     # Update TC kernel and info if needed
     tc_release = '/usr/share/doc/tc/release.txt'
-    if ("tinycore_version" not in config[i] or
-        config[i]["tinycore_version"] is None
+    if ("tinycore_version" not in config[m] or
+        config[m]["tinycore_version"] is None
     ):
         # Default to TC 7.x
-        config[i]["tinycore_version"] = "7"
+        config[m]["tinycore_version"] = "7"
         if os.path.isfile(tc_release):
             with open(tc_release) as f:
                 for line in f:
                     tc_version = line.strip()
                     if tc_version == "":
                         continue
-                    config[i]["tinycore_version"] = tc_version.split('.')[0]
-    if ("tinycore_arch" not in config[i] or
-        config[i]["tinycore_arch"] is None
+                    config[m]["tinycore_version"] = tc_version.split('.')[0]
+    if ("tinycore_arch" not in config[m] or
+        config[m]["tinycore_arch"] is None
     ):
         # Default to x86 (over x86_64)
-        config[i]["tinycore_arch"] = "x86"
+        config[m]["tinycore_arch"] = "x86"
         if os.path.isfile(tc_release):
             shell = os.path.abspath(
                 os.path.expandvars(os.path.realpath('/bin/sh')))
-            config[i]["tinycore_arch"] = \
+            config[m]["tinycore_arch"] = \
                 subprocess.run(['file', shell],
                     check=True, stdout=subprocess.PIPE
                 ).stdout
     kernel = ExtensionList.tc_kernel(
-        config[i]["tinycore_version"], config[i]["tinycore_arch"])
+        config[m]["tinycore_version"], config[m]["tinycore_arch"])
     if os.path.isfile(tc_release):
         kernel = \
             subprocess.run(['uname', '-r'],
@@ -527,40 +559,50 @@ def read_configuration(args):
             ).stdout
 
     if (kernel is None and
-        ("tinycore_kernel" not in config[i] or
-        config[i]["tinycore_kernel"] is None)
+        ("tinycore_kernel" not in config[m] or
+        config[m]["tinycore_kernel"] is None)
     ):
         return None
-    config[i]["tinycore_kernel"] = kernel
+    config[m]["tinycore_kernel"] = kernel
 
-    if "tinycore_mirror" not in config[i] or config[i]["tinycore_mirror"] is None:
-        config[i]["tinycore_mirror"] = "http://tinycorelinux.net"
+    if "tinycore_mirror" not in config[m] or config[m]["tinycore_mirror"] is None:
+        config[m]["tinycore_mirror"] = "http://tinycorelinux.net"
 
-    # if no output, base off config filename, tc-version & arch, and curdir
-    out_file = os.path.splitext(
-        os.path.basename(config[i]["config"]))[0]
-    out_file = "".join([
-        out_file,
-        "-",config[i]["tinycore_version"],
-        "-",config[i]["tinycore_arch"],
-        ".gz"
-    ])
-    out_dir = ""
-    if "output" in config[i]:
-        out_dir = os.path.abspath(
-            os.path.realpath(os.path.expandvars(config[i]["output"])))
-    if out_dir == "":
-        new_path = os.path.abspath(
-            os.path.realpath(os.path.expandvars("./")))
-        new_out = os.path.join(new_path, out_file)
-        config[i]["output"] = new_out
-    elif os.path.isdir(out_dir):
-        # just update the file-name
-        new_out = os.path.join(out_dir, out_file)
-        config[i]["output"] = new_out
-    else:
-        # otherwise, just make sure it's a full absolute path
-        config[i]["output"] = out_dir
+    config_name = os.path.splitext(
+            os.path.basename(config[m]["config"]))[0]
+    sections = [i]
+    if "sections" in config[i]:
+        sections = config[i]["sections"].split(",")
+        config_name = None
+    for s in sections.copy():
+        s = s.strip()
+        # if no output, base off config filename|section name, tc-version & arch, and curdir
+        out_file = config_name
+        if out_file is None:
+            out_file = s
+        out_file = "".join([
+            out_file,
+            "_",config[m]["tinycore_version"],
+            "-",config[m]["tinycore_arch"],
+            ".gz"
+        ])
+        out_dir = ""
+        if "output" in config[s]:
+            out_dir = os.path.abspath(
+                os.path.realpath(
+                os.path.expandvars(config[s]["output"])))
+        if out_dir == "":
+            new_path = os.path.abspath(
+                os.path.realpath(os.path.expandvars("./")))
+            new_out = os.path.join(new_path, out_file)
+            config[s]["output"] = new_out
+        elif os.path.isdir(out_dir):
+            # just update the file-name
+            new_out = os.path.join(out_dir, out_file)
+            config[s]["output"] = new_out
+        else:
+            # otherwise, just make sure it's a full absolute path
+            config[s]["output"] = out_dir
 
     return config
 
@@ -631,7 +673,8 @@ def tc_bundle_path(dir_path, bundle):
     # cd dir_path; find|cpio -v -o -H newc|gzip -2 -v > bundle
     # advdef -z4 bundle
     gzip_lvl = 9
-    subprocess.call(['mv', '-f', bundle, bundle + '.old'])
+    if os.path.isfile(bundle):
+        shutil.move(bundle, bundle + '.old')
     if (subprocess.call('advdef >/dev/null 2>&1',shell=True) == 0):
         gzip_lvl = 2
     print("Packaging the init image, this can take a few moments...")
@@ -667,14 +710,28 @@ def tc_bundle_path(dir_path, bundle):
 # TODO: update to subprocess.run() or maybe shutil.copy2
 def copy_extensions(dir_path, extensions):
     # Copy .tcz, .tcz.dep, .tcz.md5.txt, .tcz.list, and .tcz.info
-    for ext in extensions:
-        subprocess.call(
-            "cp -fp {0} {0}.dep {0}.md5.txt {0}.list {0}.info {1} 2>/dev/null".\
-            format(ext, dir_path),
-            shell=True)
+    if not isinstance(extensions, ExtensionList):
+        return False
+    md5 = '.md5.txt'
+    dep = '.dep'
+    for ext in extensions.extensions.values():
+        tczpath = ext.full_path()
+        d_path = os.path.join(dir_path, ext.name)
+        if tczpath == d_path:
+            continue
+        shutil.copyfile(tczpath, d_path, follow_symlinks=True)
+        shutil.copyfile(tczpath + md5, d_path + md5, follow_symlinks=True)
+        # .dep files are only required to exist if there are dependencies
+        if os.path.isfile(tczpath + dep):
+            shutil.copyfile(
+                tczpath + dep,
+                d_path + dep,
+                follow_symlinks=True
+            )
+    return True
 
 # TODO: update to subprocess.run() or maybe shutil.copy2
-def copy_backup(raw_data, work_dir):
+def copy_backup(raw_data, tce_dir):
     data_file = os.path.abspath(os.path.realpath(raw_data))
     if not os.path.isfile(data_file):
         return 1
@@ -682,33 +739,36 @@ def copy_backup(raw_data, work_dir):
         0 == subprocess.call(
             ['cp', '-fp',
             data_file,
-            os.path.join(work_dir, 'mydata.tgz')]
+            os.path.join(tce_dir, 'mydata.tgz')]
         )
     ):
         return 0
     return 1
 
 # TODO: update to subprocess.run()
-def extract_core(raw_core_path, work_dir):
+def extract_core(raw_core_path, raw_root):
     """Extract a core.gz into work directory
 
     Args:
         raw_core_path: path to core.gz file to extract
-        work_dir: path to work_root
+        raw_root: path to work_root
     """
     safe_core_path = os.path.abspath(
         os.path.realpath(
         os.path.expandvars(raw_core_path)))
     if not os.path.isfile(safe_core_path):
         print("initrd file not found: {}".format(safe_core_path))
-        return 1
+        return False
+    if not os.path.isdir(raw_root):
+        print("initrd extraction directory not found: {}".format(raw_root))
+        return False
     zcat = subprocess.Popen(
         ['zcat', safe_core_path],
         stdout=subprocess.PIPE
     )
     cpio = subprocess.Popen(
         ['cpio','-mi','-H','newc','-d'],
-        cwd=work_dir, stdin=zcat.stdout,
+        cwd=raw_root, stdin=zcat.stdout,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
     # Allow zcat to receive a SIGPIPE if cpio exits.
@@ -717,7 +777,9 @@ def extract_core(raw_core_path, work_dir):
     # don't make a zombie process
     zcat.wait()
     # do we need to | this with zcat.returncode ?
-    retcode = cpio.returncode
+    retcode = False
+    if cpio.returncode == 0:
+        retcode = True
     """
     output=`dmesg | grep hda`
     # becomes
@@ -730,6 +792,129 @@ def extract_core(raw_core_path, work_dir):
     """
     # TODO (chazzam) determine if the extraction succeeded
     return retcode
+
+def bundle_section(config=None, sec=None):
+    if config is None or sec is None:
+        return False
+    if sec not in config:
+        return False
+    print(
+        "Processing section:{0} from config:{1}".format(
+            sec, config["install"]["config"]
+        )
+    )
+    # Build current list of extensions (extensions + onboot)
+    extlist_args = {
+        'version': config["install"]["tinycore_version"],
+        'arch': config["install"]["tinycore_arch"],
+        'kernel': config["install"]["tinycore_kernel"],
+        'mirror': config["install"]["tinycore_mirror"]
+    }
+
+    extension_list = ExtensionList(**extlist_args)
+    onboot_list = ExtensionList(**extlist_args)
+    copy2fs_list = ExtensionList(**extlist_args)
+    if "extensions" in config[sec]:
+        extension_list.update(config[sec]["extensions"].split(','))
+    if "onboot" in config[sec]:
+        onboot_list.update(config[sec]["onboot"].split(','))
+        extension_list.update(onboot_list)
+        print("\nOnboot extensions:\n{0}".format(onboot_list))
+    if "copy2fs" in config[sec]:
+        copy2fs_list.update(config[sec]["copy2fs"].split(','))
+        if not ( len(copy2fs_list) == 1 and
+          ("all" in copy2fs_list or "flag" in copy2fs_list)
+          ):
+            extension_list.update(copy2fs_list)
+    if "exclude_extensions" in config[sec]:
+        raw_exc = set(config[sec]["exclude_extensions"].split(","))
+        safe_exc = set()
+        for exc in raw_exc:
+            exc = exc.strip()
+            if exc is None or exc == "":
+                continue
+            safe_exc.add(exc)
+        extension_list.exclude_extensions(safe_exc)
+        onboot_list.exclude_extensions(safe_exc)
+        copy2fs_list.exclude_extensions(safe_exc)
+    config[sec]["onboot"] = str(onboot_list)
+    config[sec]["copy2fs"] = str(copy2fs_list)
+    config[sec]["extensions"] = str(extension_list)
+    if "implicit_copy2fs" in config[sec]:
+        # Don't include the implicit copy2fs extensions in the regular copy2fs
+        # They are to be written to the copy2fs.lst, but not explicitly included
+        # in the image.
+        implicit_list = ExtensionList(**extlist_args)
+        implicit_list.update(config[sec]["implicit_copy2fs"].split(','))
+        config[sec]["implicit_copy2fs"] = str(implicit_list)
+        # We do want to print the implicit copy2fs extensions though, so update it now
+        copy2fs_list.update(implicit_list)
+    if len(copy2fs_list) > 0:
+        print("\nCopy to filesystem extensions:\n{0}".format(str(copy2fs_list)))
+
+    # Setup directory list default for extension searching
+    dir_list = []
+    if "extensions_local_dir" in config[sec]:
+        dir_list = config[sec]["extensions_local_dir"].split(',')
+    if os.path.isfile('/usr/share/doc/tc/release.txt'):
+        # Append the system extension directory if running on a TC system
+        dir_list.extend([
+            '/etc/sysconfig/tcedir/optional/upgrades',
+            '/etc/sysconfig/tcedir/optional/'
+        ])
+    config[sec]["extensions_local_dir"] = ','.join(dir_list)
+
+    # Build out the recursive list of directories to search now.
+    print("\nBuilding recursive directory list...")
+    safe_dirs = recursive_dirs(dir_list)
+    print("Locating all extensions and dependencies...\n")
+
+    # setup folder structure within temp dir
+    # Clear the bundle folder if it exists, for each sec
+    shutil.rmtree(config["install"]["work_bundle"], ignore_errors=True)
+    mkdir_p(config["install"]["work_install"])
+
+    search_dirs = [config["install"]["work_download"]]
+    search_dirs.extend(safe_dirs)
+    if not extension_list.localize_all_deps(
+        search_dirs, config["install"]["work_download"]
+    ):
+        return False
+    if len(extension_list.excluded_extensions) > 0:
+        print(
+            "\nExcluded extensions:\n{0}\n".format(
+            ", ".join(extension_list.excluded_extensions)))
+    print("\nIncluding extensions:\n{0}\n".format(extension_list))
+
+    if config.getboolean(sec, "dry_run"):
+        return True
+
+    # TODO (chazzam) verify the value is boolean, set false if not
+    if "expand_tcz" not in config[sec]:
+        config[sec]["expand_tcz"] = "no";
+
+    # If combined_init, extract the init into work_root
+    if "combined_init" in config[sec]:
+        # TODO (chazzam) check the output and verify this succeeds.
+        raw_init_path = config[sec]["combined_init"]
+        if not extract_core(raw_init_path, config["install"]["work_bundle"]):
+            return False
+    if config.getboolean(sec, "expand_tcz"):
+        print("Currently, expanding the tcz files is unsupported")
+        return False
+    else:
+        # copy everything to temp dir
+        copy_extensions(config["install"]["work_install"], extension_list)
+    # write copy2fs.* and onboot.lst if needed
+    write_onboot_lst(onboot_list, config["install"]["work_tce"])
+    if "copy2fs" in config[sec]:
+        write_copy2fs(copy2fs_list, config["install"]["work_tce"])
+    if "mydata" in config[sec]:
+        copy_backup(config[sec]["mydata"], config["install"]["work_tce"])
+    # squashfs the needful
+    # gzip and advdef if it possible
+    tc_bundle_path(config["install"]["work_bundle"], config[sec]["output"])
+    return True
 
 def main(argv=None):
     """Main function of script.
@@ -757,106 +942,29 @@ def main(argv=None):
         print("\n\nERROR: Must run as super-user if not a dry-run\n")
         return 1
 
-    # Build current list of extensions (extensions + onboot)
-    extlist_args = {
-        'version': config["install"]["tinycore_version"],
-        'arch': config["install"]["tinycore_arch"],
-        'kernel': config["install"]["tinycore_kernel"],
-        'mirror': config["install"]["tinycore_mirror"]
-    }
-
-    extension_list = ExtensionList(**extlist_args)
-    onboot_list = ExtensionList(**extlist_args)
-    copy2fs_list = ExtensionList(**extlist_args)
-    if "extensions" in config["install"]:
-        extension_list.update((config["install"]["extensions"]).split(','))
-    if "onboot" in config["install"]:
-        onboot_list.update((config["install"]["onboot"]).split(','))
-        extension_list.update(onboot_list)
-        print("\nOnboot extensions:\n{0}".format(onboot_list))
-    if "copy2fs" in config["install"]:
-        copy2fs_list.update((config["install"]["copy2fs"]).split(','))
-        if not ( len(copy2fs_list) == 1 and
-          ("all" in copy2fs_list or "flag" in copy2fs_list)
-          ):
-            extension_list.update(copy2fs_list)
-    config["install"]["onboot"] = str(onboot_list)
-    config["install"]["copy2fs"] = str(copy2fs_list)
-    config["install"]["extensions"] = str(extension_list)
-    if "implicit_copy2fs" in config["install"]:
-        # Don't include the implicit copy2fs extensions in the regular copy2fs
-        # They are to be written to the copy2fs.lst, but not explicitly included
-        # in the image.
-        implicit_list = ExtensionList(**extlist_args)
-        implicit_list.update(config["install"]["implicit_copy2fs"].split(','))
-        config["install"]["implicit_copy2fs"] = str(implicit_list)
-        # We do want to print the implicit copy2fs extensions though, so update it now
-        copy2fs_list.update(implicit_list)
-    if len(copy2fs_list) > 0:
-        print("\nCopy to filesystem extensions:\n{0}".format(str(copy2fs_list)))
-
-    # Setup directory list default for extension searching
-    dir_list = []
-    if "extensions_local_dir" in config["install"]:
-        dir_list = config["install"]["extensions_local_dir"].split(',')
-    if os.path.isfile('/usr/share/doc/tc/release.txt'):
-        # Append the system extension directory if running on a TC system
-        dir_list.extend([
-            '/etc/sysconfig/tcedir/optional/upgrades',
-            '/etc/sysconfig/tcedir/optional/'
-        ])
-    config["install"]["extensions_local_dir"] = ','.join(dir_list)
-
-    # Build out the recursive list of directories to search now.
-    print("\nBuilding recursive directory list...")
-    safe_dirs = recursive_dirs(dir_list)
-    print("Locating all extensions and dependencies...\n")
-
     # Create temp working directory for install
     work_root = tempfile.TemporaryDirectory(prefix="remaster-") # Python >= 3.2
-    work_dir = os.path.join(
-        work_root.name,
+    work_download = os.path.join(work_root.name, "download")
+    mkdir_p(work_download)
+    work_bundle = os.path.join(work_root.name, "bundle")
+    work_tce = os.path.join(
+        work_bundle,
         config["install"]["install_root"].lstrip('/')
     )
-    work_install = os.path.join(work_dir, "optional/")
-    # setup folder structure within temp dir
-    mkdir_p(work_install)
+    work_install = os.path.join(work_tce, "optional/")
+    config["install"]["work_download"] = work_download
+    config["install"]["work_bundle"] = work_bundle
+    config["install"]["work_tce"] = work_tce
+    config["install"]["work_install"] = work_install
 
-    search_dirs = [work_install]
-    search_dirs.extend(safe_dirs)
-    if not extension_list.localize_all_deps(search_dirs, work_install):
-        return 1
-    print("\nIncluding extensions:\n{0}\n".format(extension_list))
+    sections = ["install"]
+    if "sections" in config["install"]:
+        sections = config["install"]["sections"].split(",")
 
-    if config.getboolean("install", "dry_run"):
-        return 0
-
-    # TODO (chazzam) verify the value is boolean, set false if not
-    if "expand_tcz" not in config["install"]:
-        config["install"]["expand_tcz"] = "no";
-
-    # If combined_init, extract the init into work_root
-    if "combined_init" in config["install"]:
-        # TODO (chazzam) check the output and verify this succeeds.
-        raw_init_path = config["install"]["combined_init"]
-        ret = extract_core(raw_init_path, work_root.name)
-        if ret != 0:
+    for sec in sections.copy():
+        sec = sec.strip()
+        if not bundle_section(config, sec):
             return 1
-    if config.getboolean("install", "expand_tcz"):
-        print("Currently, expanding the tcz files is unsupported")
-        return 1
-    else:
-        # copy everything to temp dir
-        copy_extensions(work_install, extension_list)
-    # write copy2fs.* and onboot.lst if needed
-    write_onboot_lst(onboot_list, work_dir)
-    if "copy2fs" in config["install"]:
-        write_copy2fs(copy2fs_list, work_dir)
-    if "mydata" in config["install"]:
-        copy_backup(config["install"]["mydata"], work_dir)
-    # squashfs the needful
-    # gzip and advdef if it possible
-    tc_bundle_path(work_root.name, config["install"]["output"])
     return 0
 
 """allow unit testing and single exit point.
