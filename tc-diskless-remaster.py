@@ -639,10 +639,6 @@ def recursive_dirs(dirs):
                 all_dirs.append(os.path.join(root,name))
     return all_dirs
 
-def mkdir_p(path):
-    # https://stackoverflow.com/questions/600268/mkdir-p-functionality-in-python
-    os.makedirs(path, exist_ok=True) # Python >=3.2
-
 def write_onboot_lst(onboots, path):
     if len(onboots) == 0:
         return
@@ -653,7 +649,6 @@ def write_onboot_lst(onboots, path):
         for ext in onboots:
             f.write('{0}\n'.format(ext))
 
-# TODO: update to subprocess.run() or some shutil
 def write_copy2fs(copy2fs_exts, path):
     if len(copy2fs_exts) == 0:
         return
@@ -661,38 +656,41 @@ def write_copy2fs(copy2fs_exts, path):
     copy2fs = os.path.join(path, 'copy2fs.lst')
     if ("all" in copy2fs_exts) or ("flag" in copy2fs_exts):
         copy2fs.replace(".lst", ".flg")
-        print("Creating copy2fs.flg")
-        subprocess.call(['touch', copy2fs])
-        return
+        copy2fs_exts = []
 
-    print("Writing copy2fs.lst")
+    print("Writing {0}".format(os.path.basename(copy2fs)))
     with open(copy2fs, 'w') as f:
         for ext in copy2fs_exts:
             f.write('{0}\n'.format(ext))
 
-# TODO: update to subprocess.run()
 def tc_bundle_path(dir_path, bundle):
     # cd dir_path; find|cpio -v -o -H newc|gzip -2 -v > bundle
     # advdef -z4 bundle
     gzip_lvl = 9
     if os.path.isfile(bundle):
         shutil.move(bundle, bundle + '.old')
-    if (subprocess.call('advdef >/dev/null 2>&1',shell=True) == 0):
+    if (subprocess.run(
+            ['advdef', '--version'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        ).returncode == 0
+    ):
         gzip_lvl = 2
     print("Packaging the init image, this can take a few moments...")
     retcode = 1
     # Make sure the top level directory has correct permissions
-    subprocess.call(['chown', 'root:', dir_path])
-    subprocess.call(['chmod', '0755', dir_path])
+    subprocess.run(['chown', 'root:', dir_path])
+    subprocess.run(['chmod', '0755', dir_path])
     dir_home = os.path.join(dir_path, 'home/tc')
     dir_tmp = os.path.join(dir_path, 'tmp')
     if (os.path.isdir(dir_home)):
-        subprocess.call(['chown', '-R', '1001:50', dir_home])
+        subprocess.run(['chown', '-R', '1001:50', dir_home])
     if (os.path.isdir(dir_tmp)):
         subprocess.run(['chown', '-R', '1001:50', dir_tmp])
         #shutil.chown(dir_tmp, user="1001", group="50")
     with open(bundle, 'w') as f:
-        find = subprocess.Popen(['find'], cwd=dir_path, stdout=subprocess.PIPE)
+        find = subprocess.Popen(
+            ['find'], cwd=dir_path, stdout=subprocess.PIPE)
         cpio = subprocess.Popen(
             ['cpio','-o','-H','newc'],
             cwd=dir_path, stdin=find.stdout, stdout=subprocess.PIPE
@@ -710,10 +708,9 @@ def tc_bundle_path(dir_path, bundle):
         retcode = gzip.returncode
     if gzip_lvl == 2:
         print("Further compressing the init image with 'advdef', please wait...")
-        subprocess.call(['advdef', '-z4', bundle])
+        subprocess.run(['advdef', '-z4', bundle])
     print("\nProcessed config into initrd file:\n\n    {0}\n".format(bundle))
 
-# TODO: update to subprocess.run() or maybe shutil.copy2
 def copy_extensions(dir_path, extensions):
     # Copy .tcz, .tcz.dep, .tcz.md5.txt, .tcz.list, and .tcz.info
     if not isinstance(extensions, ExtensionList):
@@ -736,22 +733,16 @@ def copy_extensions(dir_path, extensions):
             )
     return True
 
-# TODO: update to subprocess.run() or maybe shutil.copy2
 def copy_backup(raw_data, tce_dir):
     data_file = os.path.abspath(os.path.realpath(raw_data))
     if not os.path.isfile(data_file):
-        return 1
-    if (
-        0 == subprocess.call(
-            ['cp', '-fp',
-            data_file,
-            os.path.join(tce_dir, 'mydata.tgz')]
-        )
-    ):
-        return 0
-    return 1
+        return False
+    dest_data = os.path.join(tce_dir, 'mydata.tgz')
+    if shutil.copy2(data_file, dest_data, follow_symlinks=True):
+        return True
+    return False
 
-# TODO: update to subprocess.run()
+# TODO: update to subprocess.run(), if it can?
 def extract_core(raw_core_path, raw_root):
     """Extract a core.gz into work directory
 
@@ -782,21 +773,9 @@ def extract_core(raw_core_path, raw_root):
     cpio.communicate()
     # don't make a zombie process
     zcat.wait()
-    # do we need to | this with zcat.returncode ?
     retcode = False
-    if cpio.returncode == 0:
+    if cpio.returncode == 0 and zcat.returncode == 0:
         retcode = True
-    """
-    output=`dmesg | grep hda`
-    # becomes
-    p1 = subprocess.Popen(["dmesg"], stdout=subprocess.PIPE)
-    p2 = subprocess.Popen(["grep", "hda"], stdin=p1.stdout, stdout=subprocess.PIPE)
-    p1.stdout.close()  # Allow p1 to receive a SIGPIPE if p2 exits.
-    output = p2.communicate()[0]
-    p1.wait() # don't make zombies
-    retcode = p2.returncode
-    """
-    # TODO (chazzam) determine if the extraction succeeded
     return retcode
 
 def bundle_section(config=None, sec=None):
@@ -878,7 +857,7 @@ def bundle_section(config=None, sec=None):
     # setup folder structure within temp dir
     # Clear the bundle folder if it exists, for each sec
     shutil.rmtree(config["install"]["work_bundle"], ignore_errors=True)
-    mkdir_p(config["install"]["work_install"])
+    os.makedirs(config["install"]["work_install"], exist_ok=True)
 
     search_dirs = [config["install"]["work_download"]]
     search_dirs.extend(safe_dirs)
@@ -901,7 +880,6 @@ def bundle_section(config=None, sec=None):
 
     # If combined_init, extract the init into work_root
     if "combined_init" in config[sec]:
-        # TODO (chazzam) check the output and verify this succeeds.
         raw_init_path = config[sec]["combined_init"]
         if not extract_core(raw_init_path, config["install"]["work_bundle"]):
             return False
@@ -951,7 +929,7 @@ def main(argv=None):
     # Create temp working directory for install
     work_root = tempfile.TemporaryDirectory(prefix="remaster-") # Python >= 3.2
     work_download = os.path.join(work_root.name, "download")
-    mkdir_p(work_download)
+    os.makedirs(work_download, exist_ok=True)
     work_bundle = os.path.join(work_root.name, "bundle")
     work_tce = os.path.join(
         work_bundle,
