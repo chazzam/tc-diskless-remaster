@@ -339,6 +339,7 @@ class ExtensionList:
                     "not found locally and could not be downloaded\n"
                 )
                 return False
+            needed_next.update(self.update_with_deps(ext))
         needed_next.discard(None)
         if len(needed) >= 1 or len(needed_next) >= 1:
             return self.localize_all_deps(dirs, dest_dir)
@@ -635,7 +636,7 @@ def recursive_dirs(dirs):
                 if re.match(kernel,name) or re.match(hidden,name):
                     d.remove(name)
                     continue
-                all_dirs.append(os.path.join([root,name]))
+                all_dirs.append(os.path.join(root,name))
     return all_dirs
 
 def mkdir_p(path):
@@ -652,6 +653,7 @@ def write_onboot_lst(onboots, path):
         for ext in onboots:
             f.write('{0}\n'.format(ext))
 
+# TODO: update to subprocess.run() or some shutil
 def write_copy2fs(copy2fs_exts, path):
     if len(copy2fs_exts) == 0:
         return
@@ -683,8 +685,12 @@ def tc_bundle_path(dir_path, bundle):
     subprocess.call(['chown', 'root:', dir_path])
     subprocess.call(['chmod', '0755', dir_path])
     dir_home = os.path.join(dir_path, 'home/tc')
+    dir_tmp = os.path.join(dir_path, 'tmp')
     if (os.path.isdir(dir_home)):
-        subprocess.call(['chown', '1001:50', dir_home])
+        subprocess.call(['chown', '-R', '1001:50', dir_home])
+    if (os.path.isdir(dir_tmp)):
+        subprocess.run(['chown', '-R', '1001:50', dir_tmp])
+        #shutil.chown(dir_tmp, user="1001", group="50")
     with open(bundle, 'w') as f:
         find = subprocess.Popen(['find'], cwd=dir_path, stdout=subprocess.PIPE)
         cpio = subprocess.Popen(
@@ -883,7 +889,7 @@ def bundle_section(config=None, sec=None):
     if len(extension_list.excluded_extensions) > 0:
         print(
             "\nExcluded extensions:\n{0}\n".format(
-            ", ".join(extension_list.excluded_extensions)))
+            ", ".join(sorted(extension_list.excluded_extensions))))
     print("\nIncluding extensions:\n{0}\n".format(extension_list))
 
     if config.getboolean(sec, "dry_run"):
