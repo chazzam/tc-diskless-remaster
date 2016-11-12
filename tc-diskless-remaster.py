@@ -559,7 +559,7 @@ def read_configuration(args):
                 check=True, stdout=subprocess.PIPE
             ).stdout
 
-    if (kernel is None and
+    if ((kernel is None or kernel == "") and
         ("tinycore_kernel" not in config[m] or
         config[m]["tinycore_kernel"] is None)
     ):
@@ -582,9 +582,9 @@ def read_configuration(args):
         if out_file is None:
             out_file = s
         out_file = "".join([
-            out_file,
-            "_",config[m]["tinycore_version"],
-            "-",config[m]["tinycore_arch"],
+            out_file,"_",
+            config[m]["tinycore_version"],
+            config[m]["tinycore_arch"],
             ".gz"
         ])
         out_dir = ""
