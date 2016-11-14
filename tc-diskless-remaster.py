@@ -2,7 +2,7 @@
 """
 Remaster a TinyCore for diskless operation
 """
-import argparse, collections, configparser
+import argparse, collections, configparser, glob
 # import errno
 import os, os.path, re
 import shutil, subprocess, sys, tempfile
@@ -296,6 +296,75 @@ class ExtensionList:
                 deps.add(new_dep)
         self.update(deps)
         return deps
+
+    def recursive_dirs(self, dirs):
+        """Get subdirs for given dirs
+
+        Get all the sub directories of the passed in dirs, be they symlinks or not
+
+        Args:
+            dirs: list of directory paths, can be symlinks
+        Returns:
+            set: abspath of initial directories and subdirs with symlinks dereferenced
+        """
+        def has_tcz(sub_dir):
+            glob_path = os.path.join(sub_dir, '**', '*.tcz')
+            tczs = len(set(map(os.path.dirname, glob.iglob(glob_path))))
+            if tczs > 0:
+                return True
+            return False
+
+        kernel = re.compile('linux-[0-9.]+')
+        hidden = re.compile('^\.')
+        my_tcz_dir = re.compile(re.escape(
+            os.path.join(self.version + '.x', self.arch, 'tcz')
+        ))
+
+        arches = ['x86','x86_64','mips','armv6','armv7']
+        if self.arch in arches:
+            del arches[self.arch]
+        tcz_dir_arch = re.compile(
+            re.escape(os.path.join('.x', self.arch, 'tcz')))
+        tcz_dir_arch_others = re.compile(
+            os.path.join(
+                re.escape('.x'),
+                '(' + '|'.join(arches) + ')',
+                'tcz'
+            )
+        )
+
+        safe_dirs = collections.OrderedDict()
+        all_dirs = []
+
+        for raw_dir in dirs.copy():
+            safe_dir = os.path.realpath(
+                os.path.abspath(os.path.expandvars(raw_dir)))
+            if not os.path.isdir(safe_dir):
+                continue
+            safe_dirs[safe_dir] = 1
+
+        for safe_dir in safe_dirs.keys():
+            for root,d,f in os.walk(safe_dir, followlinks=True):
+                if has_tcz(root):
+                    all_dirs.append(root)
+                for name in d:
+                    if re.match(kernel,name) or re.match(hidden,name):
+                        d.remove(name)
+                        continue
+                    sub_path = os.path.join(root,name)
+                    if re.match(tcz_dir_arch_others, sub_path):
+                        continue
+                    if has_tcz(sub_path):
+                        all_dirs.append(sub_path)
+        for safe_dir in all_dirs.copy():
+            if (
+                re.match(tcz_dir_arch, safe_dir) and
+                not re.match(my_tcz_dir, safe_dir)
+            ):
+                # Move extensions from another TC version to the end
+                del all_dirs[safe_dir]
+                all_dirs.append(safe_dir)
+        return all_dirs
 
     def localize_all_deps(self, dirs, dest_dir):
         """Get local absolute dereferenced paths to all needed extensions
@@ -607,38 +676,6 @@ def read_configuration(args):
 
     return config
 
-def recursive_dirs(dirs):
-    """Get subdirs for given dirs
-
-    Get all the sub directories of the passed in dirs, be they symlinks or not
-
-    Args:
-        dirs: list of directory paths, can be symlinks
-    Returns:
-        set: abspath of initial directories and subdirs with symlinks dereferenced
-    """
-    kernel = re.compile('linux-[0-9.]+')
-    hidden = re.compile('^\.')
-    safe_dirs = collections.OrderedDict()
-    all_dirs = []
-
-    for raw_dir in dirs.copy():
-        safe_dir = os.path.realpath(
-            os.path.abspath(os.path.expandvars(raw_dir)))
-        if not os.path.isdir(safe_dir):
-            continue
-        safe_dirs[safe_dir] = 1
-
-    for safe_dir in safe_dirs.keys():
-        for root,d,f in os.walk(safe_dir, followlinks=True):
-            all_dirs.append(root)
-            for name in d:
-                if re.match(kernel,name) or re.match(hidden,name):
-                    d.remove(name)
-                    continue
-                all_dirs.append(os.path.join(root,name))
-    return all_dirs
-
 def write_onboot_lst(onboots, path):
     if len(onboots) == 0:
         return
@@ -851,7 +888,7 @@ def bundle_section(config=None, sec=None):
 
     # Build out the recursive list of directories to search now.
     print("\nBuilding recursive directory list...")
-    safe_dirs = recursive_dirs(dir_list)
+    safe_dirs = extension_list.recursive_dirs(dir_list)
     print("Locating all extensions and dependencies...\n")
 
     # setup folder structure within temp dir
