@@ -308,11 +308,26 @@ class ExtensionList:
             set: abspath of initial directories and subdirs with symlinks dereferenced
         """
         def has_tcz(sub_dir):
-            glob_path = os.path.join(sub_dir, '**', '*.tcz')
+            glob_path = os.path.join(sub_dir, '**.tcz')
             tczs = len(set(map(os.path.dirname, glob.iglob(glob_path))))
             if tczs > 0:
                 return True
             return False
+        def expand_dirs(raw_dir):
+            """Handle expanding $HOME under sudo"""
+            user_home = os.path.expandvars('$HOME')
+            if 'SUDO_USER' in os.environ:
+                user_home = os.path.expanduser('~' + os.environ['SUDO_USER'])
+            mod_dir = raw_dir.replace('$HOME', user_home)
+            raw_dir = os.path.expandvars(raw_dir)
+            mod_dir = os.path.expandvars(mod_dir)
+            safe_dir = os.path.abspath(os.path.realpath(raw_dir))
+            smod_dir = os.path.abspath(os.path.realpath(mod_dir))
+            if not os.path.isdir(safe_dir):
+                safe_dir = None
+            if not os.path.isdir(smod_dir):
+                smod_dir = None
+            return (safe_dir, smod_dir)
 
         kernel = re.compile('linux-[0-9.]+')
         hidden = re.compile('^\.')
@@ -322,7 +337,7 @@ class ExtensionList:
 
         arches = ['x86','x86_64','mips','armv6','armv7']
         if self.arch in arches:
-            del arches[self.arch]
+            arches.remove(self.arch)
         tcz_dir_arch = re.compile(
             re.escape(os.path.join('.x', self.arch, 'tcz')))
         tcz_dir_arch_others = re.compile(
@@ -337,11 +352,10 @@ class ExtensionList:
         all_dirs = []
 
         for raw_dir in dirs.copy():
-            safe_dir = os.path.realpath(
-                os.path.abspath(os.path.expandvars(raw_dir)))
-            if not os.path.isdir(safe_dir):
-                continue
-            safe_dirs[safe_dir] = 1
+            safe_dir = expand_dirs(raw_dir)
+            for d in safe_dir:
+                if d is not None:
+                    safe_dirs[d] = 1
 
         for safe_dir in safe_dirs.keys():
             for root,d,f in os.walk(safe_dir, followlinks=True):
@@ -561,6 +575,16 @@ def get_options(argv=None):
     args = opts.parse_args(argv)
     return args
 
+def expand_dir(raw_dir):
+    """Handle expanding $HOME under sudo"""
+    user_home = os.path.expandvars('$HOME')
+    if 'SUDO_USER' in os.environ:
+        user_home = os.path.expanduser('~' + os.environ['SUDO_USER'])
+    raw_dir = raw_dir.replace('$HOME', user_home)
+    raw_dir = os.path.expandvars(raw_dir)
+    safe_dir = os.path.abspath(os.path.realpath(raw_dir))
+    return safe_dir
+
 def read_configuration(args):
     """Read the configuration file and add in commandline parameters
 
@@ -572,6 +596,8 @@ def read_configuration(args):
     try:
         config.read(vars(args)['config'])
     except configparser.Error:
+        print("Config file {} couldn't be parsed".
+            format(vars(args)['config']))
         return None
     # Create the internal sections
     i = "install"
@@ -614,29 +640,47 @@ def read_configuration(args):
         # Default to x86 (over x86_64)
         config[m]["tinycore_arch"] = "x86"
         if os.path.isfile(tc_release):
-            shell = os.path.abspath(
-                os.path.expandvars(os.path.realpath('/bin/sh')))
-            config[m]["tinycore_arch"] = \
-                subprocess.run(['file', shell],
-                    check=True, stdout=subprocess.PIPE
-                ).stdout
+            shell = expand_dir('/bin/sh')
+            rfile = subprocess.run(['file', shell],
+                check=True, stdout=subprocess.PIPE
+            )
+            rcut = subprocess.run(['cut','-d,','-f1'],
+                input=rfile.stdout, stdout=subprocess.PIPE
+            )
+            rgrep = subprocess.run(['egrep','-o','[0-9]{2}'],
+                input=rcut.stdout, stdout=subprocess.PIPE
+            )
+            my_arch = str(rgrep.stdout, 'utf-8').strip()
+            if my_arch == "64":
+                my_arch = "x86_64"
+            else:
+                my_arch = "x86"
+            config[m]["tinycore_arch"] = my_arch
     kernel = ExtensionList.tc_kernel(
         config[m]["tinycore_version"], config[m]["tinycore_arch"])
     if os.path.isfile(tc_release):
-        kernel = \
+        kernel = str(
             subprocess.run(['uname', '-r'],
                 check=True, stdout=subprocess.PIPE
-            ).stdout
+            ).stdout)
 
     if ((kernel is None or kernel == "") and
         ("tinycore_kernel" not in config[m] or
         config[m]["tinycore_kernel"] is None)
     ):
+        print("Couldn't determine kernel version")
         return None
     config[m]["tinycore_kernel"] = kernel
 
     if "tinycore_mirror" not in config[m] or config[m]["tinycore_mirror"] is None:
         config[m]["tinycore_mirror"] = "http://tinycorelinux.net"
+        if os.path.isfile("/opt/tcemirror"):
+            with open("/opt/tcemirror") as f:
+                for line in f:
+                    tc_mirror = line.strip()
+                    if tc_mirror == "":
+                        continue
+                    config[m]["tinycore_mirror"] = tc_mirror
 
     config_name = os.path.splitext(
             os.path.basename(config[m]["config"]))[0]
@@ -658,12 +702,9 @@ def read_configuration(args):
         ])
         out_dir = ""
         if "output" in config[s]:
-            out_dir = os.path.abspath(
-                os.path.realpath(
-                os.path.expandvars(config[s]["output"])))
+            out_dir = expand_dir(config[s]["output"])
         if out_dir == "":
-            new_path = os.path.abspath(
-                os.path.realpath(os.path.expandvars("./")))
+            new_path = expand_dir("./")
             new_out = os.path.join(new_path, out_file)
             config[s]["output"] = new_out
         elif os.path.isdir(out_dir):
@@ -673,6 +714,10 @@ def read_configuration(args):
         else:
             # otherwise, just make sure it's a full absolute path
             config[s]["output"] = out_dir
+        out_dir = os.path.dirname(config[s]["output"])
+        if not os.path.isdir(out_dir):
+            print("Config directory {} doesn't exist".format(out_dir))
+            return None
 
     return config
 
@@ -700,6 +745,7 @@ def write_copy2fs(copy2fs_exts, path):
         for ext in copy2fs_exts:
             f.write('{0}\n'.format(ext))
 
+# TODO: migrate to subprocess.run
 def tc_bundle_path(dir_path, bundle):
     # cd dir_path; find|cpio -v -o -H newc|gzip -2 -v > bundle
     # advdef -z4 bundle
@@ -771,7 +817,7 @@ def copy_extensions(dir_path, extensions):
     return True
 
 def copy_backup(raw_data, tce_dir):
-    data_file = os.path.abspath(os.path.realpath(raw_data))
+    data_file = expand_dir(raw_data)
     if not os.path.isfile(data_file):
         return False
     dest_data = os.path.join(tce_dir, 'mydata.tgz')
@@ -779,7 +825,7 @@ def copy_backup(raw_data, tce_dir):
         return True
     return False
 
-# TODO: update to subprocess.run(), if it can?
+# TODO: update to subprocess.run()
 def extract_core(raw_core_path, raw_root):
     """Extract a core.gz into work directory
 
@@ -787,9 +833,7 @@ def extract_core(raw_core_path, raw_root):
         raw_core_path: path to core.gz file to extract
         raw_root: path to work_root
     """
-    safe_core_path = os.path.abspath(
-        os.path.realpath(
-        os.path.expandvars(raw_core_path)))
+    safe_core_path = expand_dir(raw_core_path)
     if not os.path.isfile(safe_core_path):
         print("initrd file not found: {}".format(safe_core_path))
         return False
