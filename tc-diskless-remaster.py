@@ -593,28 +593,30 @@ def read_configuration(args):
     Pull in any relevant command-line parameters that should be stored for later
     """
     config = configparser.ConfigParser()
+    my_config = expand_dir(vars(args)['config'])
     try:
-        config.read(vars(args)['config'])
+        config.read(my_config)
     except configparser.Error:
-        print("Config file {} couldn't be parsed".
-            format(vars(args)['config']))
+        print("Config file {} couldn't be parsed".format(my_config))
         return None
     # Create the internal sections
     i = "install"
+    d = "DEFAULT"
     if i not in config:
         config[i] = {}
     m = i
     if "sections" in config[i]:
-        m = "DEFAULT"
+        m = d
 
     # Add the args to the config
     for k,v in vars(args).items():
         if k == "extensions_local_dir" and v is not None:
+            # Args has a list, but config has only strings
             if k not in config[d] and k in config[i]:
                 config[d][k] = config[i][k]
             elif k not in config[d] and k not in config[i]:
                 config[m][k] = ""
-            x = v.split(",")
+            x = v
             x.extend(config[m][k].split(","))
             config[m][k] = ",".join(x)
         elif v is not None:
