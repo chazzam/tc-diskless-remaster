@@ -721,6 +721,13 @@ def read_configuration(args):
             print("Config directory {} doesn't exist".format(out_dir))
             return None
 
+    # TODO: Verify we have all the required fields if they weren't specified
+    if ("install_root" not in config[m] or
+        config[m]["install_root"] is None or
+        config[m]["install_root"] == ""
+    ):
+        config[m]["install_root"] = "/tmp/tce"
+
     return config
 
 def write_onboot_lst(onboots, path):
