@@ -533,7 +533,11 @@ def get_options(argv=None):
 
     opts.add_argument(
         "--extensions-local-dir", "-e", type=existing_dir, nargs="*",
-        help="Specify locally mounted locations to find extensions"
+        help="Specify additional locally mounted locations to find extensions"
+    )
+    opts.add_argument(
+        "--exclusive-extensions-local-dir", "-E", type=existing_dir, nargs="*",
+        help="Exclusive locally mounted locations to find extensions"
     )
     #~ opts.add_argument(
         #~ "--remote-extensions", "-E", nargs="*",
@@ -597,7 +601,7 @@ def read_configuration(args):
     try:
         config.read(my_config)
     except configparser.Error:
-        print("Config file {} couldn't be parsed".format(my_config))
+        print("Config file {} couldn't be parsed\n\n".format(my_config))
         return None
     # Create the internal sections
     i = "install"
@@ -607,7 +611,7 @@ def read_configuration(args):
     m = i
     if "sections" in config[i]:
         m = d
-
+    exc_exts = ""
     # Add the args to the config
     for k,v in vars(args).items():
         if k == "extensions_local_dir" and v is not None:
@@ -619,8 +623,17 @@ def read_configuration(args):
             x = v
             x.extend(config[m][k].split(","))
             config[m][k] = ",".join(x)
+        elif k == "exclusive_extensions_local_dir" and v is not None:
+            config[m][k] = ",".join(v)
+            exc_exts = config[m][k]
         elif v is not None:
             config[m][k] = str(v)
+
+    if exc_exts is None or exc_exts == "":
+        exc_exts = ""
+        config[m]["exclusive_extensions_local_dir"] = exc_exts
+    else:
+        config[m]["extensions_local_dir"] = exc_exts
 
     # Update TC kernel and info if needed
     tc_release = '/usr/share/doc/tc/release.txt'
@@ -660,17 +673,17 @@ def read_configuration(args):
             config[m]["tinycore_arch"] = my_arch
     kernel = ExtensionList.tc_kernel(
         config[m]["tinycore_version"], config[m]["tinycore_arch"])
-    if os.path.isfile(tc_release):
+    if os.path.isfile(tc_release) and (kernel is None or kernel == ""):
         kernel = str(
             subprocess.run(['uname', '-r'],
                 check=True, stdout=subprocess.PIPE
-            ).stdout)
+            ).stdout, 'utf-8').strip()
 
     if ((kernel is None or kernel == "") and
         ("tinycore_kernel" not in config[m] or
         config[m]["tinycore_kernel"] is None)
     ):
-        print("Couldn't determine kernel version")
+        print("Couldn't determine kernel version\n\n")
         return None
     config[m]["tinycore_kernel"] = kernel
 
@@ -718,8 +731,13 @@ def read_configuration(args):
             config[s]["output"] = out_dir
         out_dir = os.path.dirname(config[s]["output"])
         if not os.path.isdir(out_dir):
-            print("Config directory {} doesn't exist".format(out_dir))
+            print("Config directory {} doesn't exist\n\n".format(out_dir))
             return None
+        # Setup the exclusive local extensions directory in each section
+        config[s]["exclusive_extensions_local_dir"] = exc_exts
+        if exc_exts != "":
+            config[s]["extensions_local_dir"] = exc_exts
+
 
     # TODO: Verify we have all the required fields if they weren't specified
     if ("install_root" not in config[m] or
@@ -931,7 +949,10 @@ def bundle_section(config=None, sec=None):
     dir_list = []
     if "extensions_local_dir" in config[sec]:
         dir_list = config[sec]["extensions_local_dir"].split(',')
-    if os.path.isfile('/usr/share/doc/tc/release.txt'):
+    if (
+        os.path.isfile('/usr/share/doc/tc/release.txt') and
+        config[sec]["exclusive_extensions_local_dir"] == ""
+    ):
         # Append the system extension directory if running on a TC system
         dir_list.extend([
             '/etc/sysconfig/tcedir/optional/upgrades',
@@ -1035,6 +1056,13 @@ def main(argv=None):
     if "sections" in config["install"]:
         sections = config["install"]["sections"].split(",")
 
+    print(
+        "\nUsing TinyCore {}{} and kernel {}\n".format(
+            config["install"]["tinycore_version"],
+            config["install"]["tinycore_arch"],
+            config["install"]["tinycore_kernel"],
+        )
+    )
     for sec in sections.copy():
         sec = sec.strip()
         if not bundle_section(config, sec):
