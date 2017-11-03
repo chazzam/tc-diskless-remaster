@@ -2,7 +2,7 @@
 """
 Remaster a TinyCore for diskless operation
 """
-import argparse, collections, configparser, glob
+import argparse, collections, configparser, datetime, glob
 # import errno
 import os, os.path, re
 import shutil, subprocess, sys, tempfile
@@ -508,6 +508,10 @@ def get_options(argv=None):
         "--output", "-o", type=existing_dir, help="output directory and/or file"
     )
     opts.add_argument(
+        "--version-output", "-V",
+        help="Version of generated output"
+    )
+    opts.add_argument(
         "--dry-run", "-n", action='store_true',
         help="Determine needed dependencies and stop")
     opts.add_argument(
@@ -683,7 +687,7 @@ def read_configuration(args):
         ("tinycore_kernel" not in config[m] or
         config[m]["tinycore_kernel"] is None)
     ):
-        print("Couldn't determine kernel version\n\n")
+        print("\nCouldn't determine kernel version\n\n")
         return None
     config[m]["tinycore_kernel"] = kernel
 
@@ -709,10 +713,23 @@ def read_configuration(args):
         out_file = config_name
         if out_file is None:
             out_file = s
+        d = datetime.date.today()
+        ver = ""
+        if (
+            "version_output" in config[m] and
+            config[m]["version_output"] is not None and
+            config[m]["version_output"] != ""
+        ):
+            ver = "-".join([
+                "",
+                config[m]["version_output"].replace(" ", "-")
+            ])
         out_file = "".join([
-            out_file,"_",
+            out_file,
+            ver,"_",
             config[m]["tinycore_version"],
             config[m]["tinycore_arch"],
+            d.strftime("_%y%m%d"),
             ".gz"
         ])
         out_dir = ""
@@ -787,6 +804,7 @@ def tc_bundle_path(dir_path, bundle):
     ):
         gzip_lvl = 2
     print("Packaging the init image, this can take a few moments...")
+    sys.stdout.flush()
     retcode = 1
     # Make sure the top level directory has correct permissions
     subprocess.run(['chown', 'root:', dir_path])
@@ -818,6 +836,7 @@ def tc_bundle_path(dir_path, bundle):
         retcode = gzip.returncode
     if gzip_lvl == 2:
         print("Further compressing the init image with 'advdef', please wait...")
+        sys.stdout.flush()
         subprocess.run(['advdef', '-z4', bundle])
     print("\nProcessed config into initrd file:\n\n    {0}\n".format(bundle))
 
@@ -1008,6 +1027,7 @@ def bundle_section(config=None, sec=None):
         copy_backup(config[sec]["mydata"], config["install"]["work_tce"])
     # squashfs the needful
     # gzip and advdef if it possible
+    sys.stdout.flush()
     tc_bundle_path(config["install"]["work_bundle"], config[sec]["output"])
     return True
 
