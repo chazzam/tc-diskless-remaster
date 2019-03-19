@@ -22,15 +22,29 @@ class Extension:
     """Tiny Core Extension"""
     def __init__(self, fullname):
         # Get the filename before dereferencing symlinks
+        self.alt_names = []
         self.name = os.path.basename(
             Extension.extensionize(fullname.strip()))
+        if '::=' in self.name:
+            names = self.name.split('::=')
+            self.name = names.pop(0).strip()
+            self.alt_names.extend(names)
+        if self.name == "" and len(self.alt_names) > 0:
+            self.name = self.alt_names.pop(0)
         self.path = ""
+        self.name_cycles = 0
         self.exists = False
         self.update_path(os.path.dirname(fullname.strip()))
         self.depof = None
+        self.onboot = False
+        self.copy2fs = False
+        self.implicit = False
 
     def __str__(self):
         return self.full_path()
+
+    def __lt__(self, other):
+        return self.name < other.name
 
     @staticmethod
     def extensionize(name):
@@ -48,6 +62,7 @@ class Extension:
             os.path.realpath(os.path.expandvars(path)))
         fullpath = os.path.join(path, self.name)
         if not os.path.isdir(path) or not os.path.isfile(fullpath):
+            self.exists = False
             return False
         self.exists = True
         self.path = path
@@ -60,6 +75,18 @@ class Extension:
             fullpath = self.name
         return fullpath
 
+    def cycle_name(self):
+        """move current name to back of alt_names, and first alt_name to name"""
+        if len(self.alt_names) == 0:
+            return False
+        # Give up if we've cycled all the names
+        if self.name_cycles == len(self.alt_names):
+            return False
+        self.alt_names.append(self.name)
+        self.name = self.alt_names.pop(0).strip()
+        self.name_cycles += 1
+        return True
+
 class ExtensionList:
     """Tiny Core Extension List"""
     _re_KERNEL = re.compile('KERNEL')
@@ -67,10 +94,13 @@ class ExtensionList:
     @staticmethod
     def tc_kernel(major, arch):
         kernels = dict({
-            '7': '4.2.9-tinycore',
-            '6': '3.16.6-tinycore',
-            '5': '3.8.13-tinycore',
-            '4': '3.0.21-tinycore'
+            '10': '4.19.10-tinycore',
+            '9':  '4.14.10-tinycore',
+            '8':  '4.8.17-tinycore',
+            '7':  '4.2.9-tinycore',
+            '6':  '3.16.6-tinycore',
+            '5':  '3.8.13-tinycore',
+            '4':  '3.0.21-tinycore'
         })
         if major not in kernels:
             return None
@@ -80,9 +110,9 @@ class ExtensionList:
         return kernel
 
     def __init__(self,
-        version = "7",
+        version = "10",
         arch = "x86",
-        kernel = "4.2.9-tinycore",
+        kernel = "4.19.10-tinycore",
         mirror = "http://tinycorelinux.net"
     ):
         self.kernel = kernel.strip()
@@ -93,6 +123,7 @@ class ExtensionList:
         self.extensions = dict()
         self.extension_depnames = set()
         self.excluded_extensions = set()
+        self.copy2fs_all = False
 
         # Update Kernel if needed.
         kernel = ExtensionList.tc_kernel(version, arch)
@@ -135,7 +166,22 @@ class ExtensionList:
         safe_ext = raw_ext
         depname = self.make_depname(safe_ext.name)
         tczname = self.make_tczname(safe_ext.name)
-        if tczname in self or tczname in self.excluded_extensions:
+        if tczname in self.excluded_extensions:
+            return
+        if tczname in self:
+            # Copy the onboot and copy2fs flags if set.
+            # Make sure not to overwrite a True with a False.
+            if safe_ext.onboot:
+                self.extensions[tczname].onboot = True
+            if safe_ext.copy2fs:
+                self.extensions[tczname].copy2fs = True
+            # set implicit False if any copy is False
+            self.extensions[tczname].implicit &= safe_ext.implicit
+            # Combine alt_names list if needed
+            for name in safe_ext.alt_names:
+                if name in self.extensions[tczname].alt_names:
+                    continue
+                self.extensions[tczname].alt_names.append(name)
             return
         safe_ext.name = tczname
         self.extensions[tczname] = safe_ext
@@ -254,18 +300,24 @@ class ExtensionList:
             self.arch,
             "tcz"
         ])
-        tczurl = "/".join([mirror, ext.name])
-        tczpath = os.path.join(dest_dir, ext.name)
+        try_alts = True
+        while try_alts:
+            # Build URLs off current extension name (can be cycled)
+            tczurl = "/".join([mirror, ext.name])
+            tczpath = os.path.join(dest_dir, ext.name)
 
-        # Download & checksum, if failed, try one more time.
-        download_files(tczurl, tczpath)
-        if checksum_files(tczpath):
-            ext.update_path(dest_dir)
-            return True
-        download_files(tczurl, tczpath)
-        if checksum_files(tczpath):
-            ext.update_path(dest_dir)
-            return True
+            # Download & checksum, if failed, try one more time.
+            download_files(tczurl, tczpath)
+            if checksum_files(tczpath):
+                ext.update_path(dest_dir)
+                return True
+            download_files(tczurl, tczpath)
+            if checksum_files(tczpath):
+                ext.update_path(dest_dir)
+                return True
+
+            if not ext.cycle_name():
+                try_alts = False
         return False
 
     def update_with_deps(self, raw_ext):
@@ -394,15 +446,14 @@ class ExtensionList:
             Bool: True if all found, False if error or any not found
         """
         # seed needed with the current full set of extension names
-        needed = set(self.extensions.keys())
+        needed = set(self.explicit_list())
         needed_next = set()
         for t_dir in dirs:
             # Search each directory for our needed extensions
-            for e in sorted(needed.copy()):
-                ext = self.extensions[e]
+            for ext in sorted(needed.copy()):
                 # If we have a path for this one, we don't need to find it.
                 if ext.exists:
-                    needed.discard(ext.name)
+                    needed.discard(ext)
                     continue
                 # If it isn't available at this path, move on
                 if not ext.update_path(t_dir):
@@ -410,9 +461,8 @@ class ExtensionList:
                 # Add any dependencies of this extension to the list
                 print("Found {0} in {1}".format(ext.name, t_dir))
                 needed_next.update(self.update_with_deps(ext))
-                needed.discard(ext.name)
-        for e in needed:
-            ext = self.extensions[e]
+                needed.discard(ext)
+        for ext in needed:
             print(
                 "Downloading {0} from {1}".format(
                     ext.name, self.mirror)
@@ -427,6 +477,59 @@ class ExtensionList:
         if len(needed) >= 1 or len(needed_next) >= 1:
             return self.localize_all_deps(dirs, dest_dir)
         return True
+
+    def onboot_names(self):
+        """Return list of names of onboot extensions"""
+        ext_names = []
+        for ext in self.extensions.values():
+            if not ext.onboot:
+                continue
+            ext_names.append(ext.name)
+        return ', '.join(sorted(ext_names))
+
+    def copy2fs_names(self):
+        """Return list of names of copy2fs extensions"""
+        ext_names = []
+        for ext in self.extensions.values():
+            if not ext.copy2fs:
+                continue
+            ext_names.append(ext.name)
+        return ', '.join(sorted(ext_names))
+
+    def explicit_list(self):
+        """Return list of non-implicit extensions"""
+        exts = []
+        for ext in self.extensions.values():
+            if ext.implicit:
+                continue
+            exts.append(ext)
+        return exts
+
+    def write_onboot_lst(self, path):
+        if len(self.onboot_names()) == 0:
+            return
+
+        print("Writing onboot.lst")
+        onboot_lst = os.path.join(path, 'onboot.lst')
+        with open(onboot_lst, 'w') as f:
+            for ext in self.onboot_names().split(', '):
+                f.write('{0}\n'.format(ext.strip()))
+
+    def write_copy2fs(self, path):
+        if len(self.copy2fs_names()) == 0 and not self.copy2fs_all:
+            return
+
+        copy2fs = os.path.join(path, 'copy2fs.lst')
+        copy2fs_exts = self.copy2fs_names().split(', ')
+        if self.copy2fs_all:
+            copy2fs.replace(".lst", ".flg")
+            copy2fs_exts = []
+
+        print("Writing {0}".format(os.path.basename(copy2fs)))
+        with open(copy2fs, 'w') as f:
+            for ext in copy2fs_exts:
+                f.write('{0}\n'.format(ext.strip()))
+
 
 def existing_dir(value):
     """verify argument is or references an existing directory.
@@ -765,30 +868,6 @@ def read_configuration(args):
 
     return config
 
-def write_onboot_lst(onboots, path):
-    if len(onboots) == 0:
-        return
-
-    print("Writing onboot.lst")
-    onboot_lst = os.path.join(path, 'onboot.lst')
-    with open(onboot_lst, 'w') as f:
-        for ext in onboots:
-            f.write('{0}\n'.format(ext))
-
-def write_copy2fs(copy2fs_exts, path):
-    if len(copy2fs_exts) == 0:
-        return
-
-    copy2fs = os.path.join(path, 'copy2fs.lst')
-    if ("all" in copy2fs_exts) or ("flag" in copy2fs_exts):
-        copy2fs.replace(".lst", ".flg")
-        copy2fs_exts = []
-
-    print("Writing {0}".format(os.path.basename(copy2fs)))
-    with open(copy2fs, 'w') as f:
-        for ext in copy2fs_exts:
-            f.write('{0}\n'.format(ext))
-
 # TODO: migrate to subprocess.run
 def tc_bundle_path(dir_path, bundle):
     # cd dir_path; find|cpio -v -o -H newc|gzip -2 -v > bundle
@@ -850,6 +929,9 @@ def copy_extensions(dir_path, extensions):
         tczpath = ext.full_path()
         d_path = os.path.join(dir_path, ext.name)
         if tczpath == d_path:
+            continue
+        if not os.path.isfile(tczpath):
+            # Skip implicit entries that weren't otherwise included
             continue
         shutil.copyfile(tczpath, d_path, follow_symlinks=True)
         shutil.copyfile(tczpath + md5, d_path + md5, follow_symlinks=True)
@@ -924,16 +1006,20 @@ def bundle_section(config=None, sec=None):
     }
 
     extension_list = ExtensionList(**extlist_args)
-    onboot_list = ExtensionList(**extlist_args)
-    copy2fs_list = ExtensionList(**extlist_args)
     if "extensions" in config[sec]:
         extension_list.update(config[sec]["extensions"].split(','))
     if "onboot" in config[sec]:
+        onboot_list = ExtensionList(**extlist_args)
         onboot_list.update(config[sec]["onboot"].split(','))
+        for ext in onboot_list.extensions.values():
+            ext.onboot = True
         extension_list.update(onboot_list)
         print("\nOnboot extensions:\n{0}".format(onboot_list))
     if "copy2fs" in config[sec]:
+        copy2fs_list = ExtensionList(**extlist_args)
         copy2fs_list.update(config[sec]["copy2fs"].split(','))
+        for ext in copy2fs_list.extensions.values():
+            ext.copy2fs = True
         if not ( len(copy2fs_list) == 1 and
           ("all" in copy2fs_list or "flag" in copy2fs_list)
           ):
@@ -947,10 +1033,10 @@ def bundle_section(config=None, sec=None):
                 continue
             safe_exc.add(exc)
         extension_list.exclude_extensions(safe_exc)
-        onboot_list.exclude_extensions(safe_exc)
-        copy2fs_list.exclude_extensions(safe_exc)
-    config[sec]["onboot"] = str(onboot_list)
-    config[sec]["copy2fs"] = str(copy2fs_list)
+        # ~ onboot_list.exclude_extensions(safe_exc)
+        # ~ copy2fs_list.exclude_extensions(safe_exc)
+    config[sec]["onboot"] = extension_list.onboot_names()
+    config[sec]["copy2fs"] = extension_list.copy2fs_names()
     config[sec]["extensions"] = str(extension_list)
     if "implicit_copy2fs" in config[sec]:
         # Don't include the implicit copy2fs extensions in the regular copy2fs
@@ -958,11 +1044,14 @@ def bundle_section(config=None, sec=None):
         # in the image.
         implicit_list = ExtensionList(**extlist_args)
         implicit_list.update(config[sec]["implicit_copy2fs"].split(','))
+        for ext in implicit_list.extensions.values():
+            ext.copy2fs = True
+            ext.implicit = True
         config[sec]["implicit_copy2fs"] = str(implicit_list)
         # We do want to print the implicit copy2fs extensions though, so update it now
-        copy2fs_list.update(implicit_list)
-    if len(copy2fs_list) > 0:
-        print("\nCopy to filesystem extensions:\n{0}".format(str(copy2fs_list)))
+        extension_list.update(implicit_list)
+    if len(extension_list.copy2fs_names()) > 0:
+        print("\nCopy to filesystem extensions:\n{0}".format(extension_list.copy2fs_names()))
 
     # Setup directory list default for extension searching
     dir_list = []
@@ -1020,9 +1109,9 @@ def bundle_section(config=None, sec=None):
         # copy everything to temp dir
         copy_extensions(config["install"]["work_install"], extension_list)
     # write copy2fs.* and onboot.lst if needed
-    write_onboot_lst(onboot_list, config["install"]["work_tce"])
+    extension_list.write_onboot_lst(config["install"]["work_tce"])
     if "copy2fs" in config[sec]:
-        write_copy2fs(copy2fs_list, config["install"]["work_tce"])
+        extension_list.write_copy2fs(config["install"]["work_tce"])
     if "mydata" in config[sec]:
         copy_backup(config[sec]["mydata"], config["install"]["work_tce"])
     # squashfs the needful
